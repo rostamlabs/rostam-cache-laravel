@@ -363,4 +363,5 @@ the v0.5.0 ops, which is how the version guard is tested.
 
 ## License
 
-MIT.
+Apache-2.0, the same licence as [Rostam](https://github.com/rostamlabs/rostam)
+itself — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
