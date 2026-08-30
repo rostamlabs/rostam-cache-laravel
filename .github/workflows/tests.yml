@@ -45,6 +45,11 @@ jobs:
       matrix:
         php: ['8.2', '8.3', '8.4']
         laravel: ['12.*', '13.*']
+        exclude:
+          # Laravel 13 requires PHP 8.3. The pair does not exist, so asking for
+          # it is not a gap in coverage - it is a job that can only ever fail.
+          - php: '8.2'
+            laravel: '13.*'
         include:
           - laravel: '12.*'
             testbench: '10.*'
