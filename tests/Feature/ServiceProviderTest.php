@@ -152,6 +152,15 @@ class ServiceProviderTest extends TestCase
 
     public function test_cache_clear_can_flush_locks(): void
     {
+        // Flushing locks through cache:clear --locks arrived in Laravel 13. On
+        // 11 and 12 the store still implements the interface (declared by this
+        // package where the framework does not ship it) and flushLocks() is
+        // callable directly - there is simply no framework feature here to
+        // exercise.
+        if (! method_exists(Cache::store('rostam'), 'supportsFlushingLocks')) {
+            $this->markTestSkipped('cache:clear --locks arrived in Laravel 13');
+        }
+
         $this->assertTrue(Cache::store('rostam')->supportsFlushingLocks());
         $this->assertTrue(Cache::store('rostam')->lock('deploy', 60)->get());
 

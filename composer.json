@@ -18,15 +18,15 @@
     "require": {
         "php": "^8.2",
         "rostamlabs/rostam-client-php": "^0.1",
-        "illuminate/cache": "^11.0|^12.0|^13.0",
-        "illuminate/console": "^11.0|^12.0|^13.0",
-        "illuminate/contracts": "^11.0|^12.0|^13.0",
-        "illuminate/support": "^11.0|^12.0|^13.0"
+        "illuminate/cache": "^12.0|^13.0",
+        "illuminate/console": "^12.0|^13.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0"
     },
     "require-dev": {
         "laravel/framework": "12.*",
         "laravel/pint": "^1.13",
-        "orchestra/testbench": "10.*",
+        "orchestra/testbench": "^10.0|^11.0",
         "phpunit/phpunit": "^10.5|^11.5|^12.0"
     },
     "autoload": {
