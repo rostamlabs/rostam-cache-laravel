@@ -13,7 +13,12 @@ token auth, with no extensions beyond core streams.
 ## Requirements
 
 - PHP 8.2+ on a 64-bit build
-- Laravel 11, 12 or 13
+- Laravel 12 or 13
+
+  Laravel 11 is not supported, and not by choice: every 11.x release is blocked
+  by a Packagist security advisory, so Composer will not install one without
+  the advisory check turned off. Claiming it would promise something you
+  cannot actually install.
 - **Rostam v0.5.0 or newer**, started with a `-tcp` listener
 
 v0.5.0 is where the conditional writes (`set_nx`, `cas`, `cad`, `caex`) and

@@ -1,0 +1,125 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  style:
+    name: formatting
+    runs-on: ubuntu-latest
+
+    # Once, not per matrix entry. Pint's own rules move between releases, so
+    # asking the oldest allowed Pint to agree with the newest about the same
+    # file is a question with no answer rather than a finding.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - run: vendor/bin/pint --test
+
+  test:
+    name: PHP ${{ matrix.php }} / Laravel ${{ matrix.laravel }}
+    runs-on: ubuntu-latest
+
+    # A cache driver lives or dies by the framework contract it implements, and
+    # that contract moves. The matrix is the framework versions the manifest
+    # claims, on the PHP versions each of them supports.
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+        laravel: ['12.*', '13.*']
+        exclude:
+          # Laravel 13 requires PHP 8.3. The pair does not exist, so asking for
+          # it is not a gap in coverage - it is a job that can only ever fail.
+          - php: '8.2'
+            laravel: '13.*'
+        include:
+          - laravel: '12.*'
+            testbench: '10.*'
+          - laravel: '13.*'
+            testbench: '11.*'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Pin the framework for this run
+        run: >
+          composer require --no-update --no-interaction --dev
+          "laravel/framework:${{ matrix.laravel }}"
+          "orchestra/testbench:${{ matrix.testbench }}"
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Run the suite
+        run: vendor/bin/phpunit
+
+  conformance:
+    name: conformance against a real rostam-server
+    runs-on: ubuntu-latest
+
+    # The suite's default target is a fake server written in PHP. A fake is a
+    # reimplementation of the protocol by the same hand that wrote the client,
+    # so a shared misreading of the wire would pass every test here and still
+    # fail in production. This lane talks to the real binary instead - it is
+    # what caught the store swallowing a framing error as "this key is not a
+    # counter", and the tag ids that a real evicting cache drops.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Fetch the latest rostam-server
+        run: |
+          set -euo pipefail
+          url=$(curl -fsSL https://api.github.com/repos/rostamlabs/rostam/releases/latest \
+            | grep -o 'https://[^"]*linux_amd64\.tar\.gz' | head -n1)
+          echo "downloading $url"
+          curl -fsSL "$url" -o rostam.tar.gz
+          tar xzf rostam.tar.gz
+          ./rostam-server --version
+
+      - name: Start it on the binary TCP listener
+        run: |
+          set -euo pipefail
+          ./rostam-server -tcp 127.0.0.1:7411 -insecure &
+          for _ in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/7411) 2>/dev/null; then
+              echo "listening"; exit 0
+            fi
+            sleep 0.2
+          done
+          echo "the server never came up"; exit 1
+
+      - name: Run the suite against it
+        env:
+          ROSTAM_TEST_SERVER: 127.0.0.1:7411
+        run: vendor/bin/phpunit
