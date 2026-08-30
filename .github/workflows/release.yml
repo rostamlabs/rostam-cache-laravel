@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: verify and publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      # A tag is the one moment a mistake becomes permanent: Packagist reads the
+      # tag, and a released version cannot be taken back, only superseded. So the
+      # gate runs again here rather than trusting that it ran on the commit.
+      - name: Validate the manifest
+        run: composer validate --strict
+
+      - name: Check formatting
+        run: vendor/bin/pint --test
+
+      - name: Run the suite
+        run: vendor/bin/phpunit
+
+      - name: Refuse a tag that disagrees with the branch
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::${{ github.ref_name }} points at a commit that is not on main"
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -n1 || true)
+          if [ -n "$previous" ]; then
+            notes=$(git log --no-merges --pretty='- %s' "$previous..${{ github.ref_name }}")
+            body=$(printf '## Changes since %s\n\n%s' "$previous" "$notes")
+          else
+            body='First release.'
+          fi
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "$body" \
+            --verify-tag
