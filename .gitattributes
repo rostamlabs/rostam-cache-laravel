@@ -1,0 +1,19 @@
+# Line endings are normalised in the repository and checked out as LF
+# everywhere. Without this a Windows checkout gets CRLF, Pint reports a
+# formatting failure nobody can reproduce on CI, and a commit made with the
+# wrong core.autocrlf puts CRLF in the repository where it fails for everyone.
+* text=auto eol=lf
+
+*.php text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
+
+# Keep the dist archive Packagist serves to what a consumer actually installs.
+/.github         export-ignore
+/tests           export-ignore
+/.gitattributes  export-ignore
+/.gitignore      export-ignore
+/phpunit.xml     export-ignore
+/pint.json       export-ignore
