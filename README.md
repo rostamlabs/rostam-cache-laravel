@@ -204,6 +204,36 @@ another process has already flushed — set it to `0` to check on every operatio
 Set `'flush' => 'unsupported'` on the store to drop the generation segment
 entirely; `flush()` then throws instead of pretending.
 
+## Sessions
+
+Set the session driver and you are done:
+
+```php
+// config/session.php
+'driver' => 'rostam',
+```
+
+**Do not point `session.store` at the Rostam cache store instead.** It appears to
+work, and it logs every user out the first time somebody runs
+`php artisan cache:clear`.
+
+That is not a bug so much as a consequence. Rostam has no FLUSHDB, so clearing the
+cache means bumping a generation number that every key is written under, and
+everything below the new generation becomes unreachable at once — sessions
+included. There is no error; the store simply answers empty:
+
+    session written, reads back:      'user=42'
+    ... php artisan cache:clear ...
+    session after the cache flush:    ''
+
+The `rostam` session driver writes under its own prefix with no generation in it,
+which puts sessions somewhere `cache:clear` cannot reach. Both halves are asserted
+in the test suite — including the failure, against Laravel's own cache-backed
+handler — so the comparison stays a fact rather than a claim.
+
+There is no garbage collection to configure: every session carries its lifetime as
+a TTL and the engine expires it.
+
 ## What eviction costs you
 
 Rostam's default `AtCapPolicy` is `PolicyRingbufEvict`: at capacity it overwrites
