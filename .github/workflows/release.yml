@@ -57,7 +57,18 @@ jobs:
           else
             body='First release.'
           fi
-          gh release create "${{ github.ref_name }}" \
+          # Create or reconcile, never fail on "it already exists". A tag can be
+          # re-pushed - moved onto a later commit before anyone has installed it,
+          # or retried after a transient failure - and when that happens the gates
+          # above are exactly what should run again. Refusing at the last step
+          # turns a green verification into a red run, which teaches everyone to
+          # ignore this workflow.
+          action=create
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            action=edit
+          fi
+
+          gh release "$action" "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --notes "$body" \
             --verify-tag
