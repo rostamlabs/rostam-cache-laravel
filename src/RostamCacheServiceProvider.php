@@ -81,8 +81,14 @@ class RostamCacheServiceProvider extends ServiceProvider
             /** @var array<string, mixed> $config */
             $config = $app['config']->get('session', []);
 
+            // NOT session.connection: that key already names a DATABASE or
+            // Redis connection for Laravel's own drivers, so an application
+            // with SESSION_CONNECTION=mysql that switched only its driver
+            // would send us looking for rostam.connections.mysql. The Rostam
+            // connection is asked for under its own name, and defaults to the
+            // default one.
             return new RostamSessionHandler(
-                $app->make(RostamManager::class)->connection($config['connection'] ?? null),
+                $app->make(RostamManager::class)->connection($config['rostam_connection'] ?? null),
                 (string) ($config['prefix'] ?? 'session:'),
                 (int) ($config['lifetime'] ?? 120),
             );

@@ -7,6 +7,7 @@ namespace Rostam\Cache\Tests\Feature;
 
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Support\Facades\Cache;
+use InvalidArgumentException;
 use Orchestra\Testbench\TestCase;
 use Rostam\Cache\Facades\Rostam;
 use Rostam\Cache\RostamCacheServiceProvider;
@@ -14,6 +15,7 @@ use Rostam\Cache\RostamManager;
 use Rostam\Cache\RostamStore;
 use Rostam\Cache\Serialization\PhpSerializer;
 use Rostam\Cache\Serialization\SerializerFactory;
+use Rostam\Cache\Session\RostamSessionHandler;
 use Rostam\Testing\ArrayKvClient;
 use Rostam\Testing\FakeServer;
 
@@ -188,5 +190,55 @@ class ServiceProviderTest extends TestCase
         config()->set('rostam.connections.dead', ['host' => '127.0.0.1', 'port' => 1, 'connect_timeout' => 0.5]);
 
         $this->artisan('rostam:ping --connection=dead')->assertFailed();
+    }
+
+    /**
+     * session.connection is not ours to read.
+     *
+     * It already names a DATABASE connection - Laravel's own database and
+     * Redis session drivers both resolve it that way - so an application
+     * running SESSION_CONNECTION=mysql that switched nothing but its driver
+     * would have sent us looking for rostam.connections.mysql, and the switch
+     * would have failed on a key the operator never pointed at us.
+     */
+    public function test_the_session_driver_leaves_laravels_connection_key_alone(): void
+    {
+        config()->set('session.driver', 'rostam');
+        config()->set('session.connection', 'mysql');
+
+        $handler = $this->app->make('session')->driver('rostam')->getHandler();
+
+        $this->assertInstanceOf(RostamSessionHandler::class, $handler);
+    }
+
+    /** A Rostam connection is chosen under a name that is unambiguously ours. */
+    public function test_the_session_driver_takes_the_connection_it_is_given(): void
+    {
+        $client = new ArrayKvClient;
+        $this->app->make(RostamManager::class)->resolver('sessions', fn (array $config) => $client);
+
+        config()->set('rostam.connections.sessions', ['host' => 'unused', 'port' => 0]);
+        config()->set('session.driver', 'rostam');
+        config()->set('session.rostam_connection', 'sessions');
+        config()->set('session.prefix', 'sess:');
+
+        $this->app->make('session')->driver('rostam')->getHandler()->write('abc', 'user=42');
+
+        $this->assertSame('user=42', $client->get('sess:abc'), 'the session went to the wrong server');
+    }
+
+    /**
+     * The lifetime is refused rather than reinterpreted, and it is refused
+     * here - when the driver is resolved - not at boot, so an application that
+     * does not use this driver is not stopped by its configuration.
+     */
+    public function test_a_session_lifetime_of_zero_is_refused(): void
+    {
+        config()->set('session.driver', 'rostam');
+        config()->set('session.lifetime', 0);
+
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->app->make('session')->driver('rostam');
     }
 }

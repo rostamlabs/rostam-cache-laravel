@@ -213,9 +213,22 @@ Set the session driver and you are done:
 'driver' => 'rostam',
 ```
 
+The server is the default one under `rostam.connections`. To use another, name it
+under `session.rostam_connection` — **not** `session.connection`, which already
+means a *database* connection to Laravel's own session drivers and would send this
+one looking for a Rostam connection by that name.
+
+`session.lifetime` must be at least one minute; a zero or negative one is refused
+rather than quietly turned into some other number. If you want the session to end
+when the browser closes, that is `session.expire_on_close`, a cookie setting, and
+it leaves this lifetime alone.
+
 **Do not point `session.store` at the Rostam cache store instead.** It appears to
-work, and it logs every user out the first time somebody runs
-`php artisan cache:clear`.
+work, and it logs every user out the first time anything flushes that store —
+`php artisan cache:clear` if it is your default cache store, or
+`php artisan cache:clear rostam` if it is a named one. (An unqualified
+`cache:clear` only clears the default store, so a session store you named
+separately survives it — until the day somebody clears that one.)
 
 That is not a bug so much as a consequence. Rostam has no FLUSHDB, so clearing the
 cache means bumping a generation number that every key is written under, and
@@ -223,13 +236,14 @@ everything below the new generation becomes unreachable at once — sessions
 included. There is no error; the store simply answers empty:
 
     session written, reads back:      'user=42'
-    ... php artisan cache:clear ...
+    ... that store is flushed ...
     session after the cache flush:    ''
 
 The `rostam` session driver writes under its own prefix with no generation in it,
-which puts sessions somewhere `cache:clear` cannot reach. Both halves are asserted
-in the test suite — including the failure, against Laravel's own cache-backed
-handler — so the comparison stays a fact rather than a claim.
+which puts sessions somewhere no cache flush reaches, whichever store it names.
+Both halves are asserted in the test suite — including the failure, against
+Laravel's own cache-backed handler — so the comparison stays a fact rather than a
+claim.
 
 There is no garbage collection to configure: every session carries its lifetime as
 a TTL and the engine expires it.

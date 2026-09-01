@@ -8,6 +8,7 @@ namespace Rostam\Cache\Tests\Unit;
 
 use Illuminate\Cache\Repository;
 use Illuminate\Session\CacheBasedSessionHandler;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use Rostam\Cache\RostamStore;
 use Rostam\Cache\Session\RostamSessionHandler;
@@ -25,6 +26,40 @@ class RostamSessionHandlerTest extends TestCase
 
         $this->client = new ArrayKvClient;
         $this->handler = new RostamSessionHandler($this->client, 'session:', 120);
+    }
+
+    /**
+     * A lifetime of zero has no honest reading: clamping it invents a policy,
+     * and storing without a TTL keeps every session ever created. Refusing is
+     * the only answer that does not surprise somebody months later.
+     */
+    public function test_a_lifetime_that_is_not_a_lifetime_is_refused(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/at least one minute/');
+
+        new RostamSessionHandler($this->client, 'session:', 0);
+    }
+
+    public function test_a_negative_lifetime_is_refused_too(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new RostamSessionHandler($this->client, 'session:', -5);
+    }
+
+    /**
+     * The refusal has to say what to change. Somebody who set the lifetime to
+     * zero was almost always reaching for expire_on_close.
+     */
+    public function test_the_refusal_points_at_the_setting_that_was_meant(): void
+    {
+        try {
+            new RostamSessionHandler($this->client, 'session:', 0);
+            $this->fail('a zero lifetime was accepted');
+        } catch (InvalidArgumentException $e) {
+            $this->assertStringContainsString('expire_on_close', $e->getMessage());
+        }
     }
 
     public function test_a_session_round_trips(): void
