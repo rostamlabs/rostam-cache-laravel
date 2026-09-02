@@ -9,6 +9,7 @@ use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
 use Rostam\Cache\Console\PingCommand;
 use Rostam\Cache\Serialization\SerializerFactory;
+use Rostam\Cache\Session\RostamSessionHandler;
 
 class RostamCacheServiceProvider extends ServiceProvider
 {
@@ -54,6 +55,43 @@ class RostamCacheServiceProvider extends ServiceProvider
             );
 
             return $app->make('cache')->repository($store, $config);
+        });
+
+        $this->registerSessionDriver();
+    }
+
+    /**
+     * Register `session.driver = rostam`.
+     *
+     * Sessions get their own prefix rather than riding on the cache store,
+     * because clearing the cache here means bumping a generation number and
+     * everything under the old one - sessions included - becomes unreachable
+     * at once. A `php artisan cache:clear` would log every user out, silently,
+     * and the store would answer empty rather than error.
+     *
+     * See {@see RostamSessionHandler}.
+     */
+    protected function registerSessionDriver(): void
+    {
+        if (! $this->app->bound('session')) {
+            return;
+        }
+
+        $this->app->make('session')->extend('rostam', function (Application $app) {
+            /** @var array<string, mixed> $config */
+            $config = $app['config']->get('session', []);
+
+            // NOT session.connection: that key already names a DATABASE or
+            // Redis connection for Laravel's own drivers, so an application
+            // with SESSION_CONNECTION=mysql that switched only its driver
+            // would send us looking for rostam.connections.mysql. The Rostam
+            // connection is asked for under its own name, and defaults to the
+            // default one.
+            return new RostamSessionHandler(
+                $app->make(RostamManager::class)->connection($config['rostam_connection'] ?? null),
+                (string) ($config['prefix'] ?? 'session:'),
+                (int) ($config['lifetime'] ?? 120),
+            );
         });
     }
 }
