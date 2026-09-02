@@ -65,6 +65,12 @@ final class ServerFlushNamespace implements CacheNamespace
         $this->client->flush();
     }
 
+    /** The whole point of this strategy, and the reason to think before choosing it. */
+    public function flushWipesTheServer(): bool
+    {
+        return true;
+    }
+
     public function supportsFlush(): bool
     {
         return true;

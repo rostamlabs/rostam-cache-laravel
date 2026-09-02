@@ -32,10 +32,12 @@ use Rostam\Exceptions\ServerException;
  * - the wire is a {@see KvClient}, so a fake transport is a constructor argument;
  * - the value encoding is a {@see ValueSerializer}, so igbinary (or anything
  *   else) is a swap rather than a subclass;
- * - what a key looks like and what "flush" means is a {@see CacheNamespace}, so
- *   the day Rostam grows a key-scan op, a third implementation is the change;
+ * - what a key looks like and what "flush" means is a {@see CacheNamespace},
+ *   which is why rostam v0.6.0's flush op arrived here as a third
+ *   implementation and not as a branch in this class;
  * - lock lifetimes hang off their own {@see Generation}, which is why
- *   `cache:clear` cannot release a running mutex while `cache:clear --locks`
+ *   `cache:clear` cannot release a running mutex (except in 'server' flush
+ *   mode, where the wipe reaches everything) while `cache:clear --locks`
  *   can.
  *
  * {@see self::make()} wires the usual combination; the constructor is there for
@@ -336,6 +338,21 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
     {
         $this->namespace->flush();
 
+        // A server-wide flush deletes the lock counter along with everything
+        // else, and a deleted counter reads back as zero. That is the one
+        // direction it must never move: a process that still has the old number
+        // cached would keep taking locks under it while a freshly started one
+        // took them under zero, and the same mutex would be held twice with
+        // neither side able to see the other.
+        //
+        // Bumping is also simply what happened - the wipe released every lock
+        // there was - and it puts the counter back above the value this process
+        // had, which every other process then converges up to on its next read
+        // because generations only ever advance.
+        if ($this->namespace->flushWipesTheServer()) {
+            $this->lockGeneration->bump();
+        }
+
         return true;
     }
 
@@ -420,6 +437,12 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
      * Locks live outside the cache generation on purpose: `cache:clear` should
      * not silently hand a running mutex to a second process. They carry their
      * own generation so `cache:clear --locks` still has something to bump.
+     *
+     * The exception is a store on `'flush' => 'server'`, where a flush is the
+     * engine's own and spares nothing: the lock keys go with everything else.
+     * {@see flush()} bumps this counter when that happens, because a counter
+     * that came back as zero would be a second lock namespace rather than a
+     * cleared one.
      */
     protected function lockKey(string $name): string
     {

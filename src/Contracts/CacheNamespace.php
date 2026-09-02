@@ -6,6 +6,7 @@ declare(strict_types=1);
 namespace Rostam\Cache\Contracts;
 
 use Rostam\Cache\Namespacing\GenerationalNamespace;
+use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
 use Rostam\Exceptions\RostamException;
 
@@ -18,8 +19,10 @@ use Rostam\Exceptions\RostamException;
  * {@see GenerationalNamespace} folds a generation
  * number into every key and bumps it to flush;
  * {@see StaticNamespace} keeps keys bare and
- * refuses to pretend it can flush. If the engine ever grows a key-scan op, a
- * third implementation is the whole change.
+ * refuses to pretend it can flush; {@see ServerFlushNamespace} calls rostam
+ * v0.6.0's own `flush`, which wipes the entire server and is opt-in for that
+ * reason. That third one is the proof of the arrangement: the engine grew an op
+ * and the store did not change a line.
  */
 interface CacheNamespace
 {
@@ -49,6 +52,17 @@ interface CacheNamespace
     public function flush(): void;
 
     public function supportsFlush(): bool;
+
+    /**
+     * Whether flush() takes the whole server with it, not just these keys.
+     *
+     * True only for the strategy built on rostam's own `flush` op, which has no
+     * unit smaller than the keyspace. The store needs to know because locks
+     * live outside this namespace on purpose and carry a counter of their own:
+     * a wipe deletes that counter, and a counter that comes back as zero is a
+     * second lock namespace running alongside the first.
+     */
+    public function flushWipesTheServer(): bool;
 
     /**
      * Drop any cached state, so the next key re-reads it from the server.

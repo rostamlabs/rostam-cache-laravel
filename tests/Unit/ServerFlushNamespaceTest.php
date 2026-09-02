@@ -84,6 +84,49 @@ class ServerFlushNamespaceTest extends TestCase
         $this->assertSame('user=42', $sessions->read('abc'));
     }
 
+    /**
+     * The failure this guards is silent and expensive: two processes holding
+     * the same mutex.
+     *
+     * Locks sit outside the cache namespace and carry a counter of their own,
+     * so `cache:clear --locks` has something to bump. A server flush deletes
+     * that counter with everything else, and a deleted counter reads back as
+     * ZERO - the one direction it must never move. A process that already had
+     * the old number cached goes on taking locks under it while a freshly
+     * started one takes them under zero, and neither can see the other.
+     *
+     * `epoch_refresh => -1` here is not an odd corner: it is the documented
+     * "read it once per process" setting, and it is where the split would never
+     * heal on its own.
+     */
+    public function test_a_server_flush_cannot_split_the_lock_namespace(): void
+    {
+        $options = ['flush' => 'server', 'epoch_refresh' => -1];
+
+        $live = RostamStore::make($this->client, 'app:', $options);
+        $live->flushLocks();
+        $live->lock('deploy', 60);
+
+        $live->flush();
+
+        // Whatever this one is now using, a process that starts afterwards and
+        // reads the counter from scratch has to arrive at the same answer.
+        $fresh = RostamStore::make($this->client, 'app:', $options);
+
+        $this->assertSame(
+            $this->lockKey($live, 'deploy'),
+            $this->lockKey($fresh, 'deploy'),
+            'a process starting after the flush landed in a different lock namespace'
+        );
+    }
+
+    private function lockKey(RostamStore $store, string $name): string
+    {
+        $method = new \ReflectionMethod($store, 'lockKey');
+
+        return $method->invoke($store, $name);
+    }
+
     public function test_every_mode_is_named(): void
     {
         $this->assertInstanceOf(GenerationalNamespace::class, $this->namespaceFor([]));

@@ -52,6 +52,12 @@ final class GenerationalNamespace implements CacheNamespace
         $this->generation->bump();
     }
 
+    /** Only this namespace goes: the generation moves, the keys stay put. */
+    public function flushWipesTheServer(): bool
+    {
+        return false;
+    }
+
     public function supportsFlush(): bool
     {
         return true;

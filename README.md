@@ -341,10 +341,16 @@ The full `Illuminate\Contracts\Cache\Store` surface is implemented — `get`,
 | `php artisan cache:clear` / `cache:forget` / `cache:clear --locks` | ✅ |
 | `SESSION_DRIVER=cache`, cached config/routes, `Cache::memo()` | ✅ |
 
-**One difference from Redis remains**, and it comes from the engine rather than
-this package: `flush()` is generational, not a wipe. Old data is abandoned
-rather than deleted, and other processes see the flush after at most
-`epoch_refresh` seconds. If Rostam ever grows a key-scan op, this goes away too.
+**One difference from Redis remains** on the default settings, and it comes
+from the engine rather than this package: `flush()` is generational, not a wipe.
+Old data is abandoned rather than deleted, and other processes see the flush
+after at most `epoch_refresh` seconds.
+
+`'flush' => 'server'` removes that difference and introduces a larger one in its
+place: rostam's own `flush` really does delete, but it deletes the entire server
+rather than this store — every other store on it, the sessions and any accepted
+queued jobs included. Neither is Redis's `FLUSHDB`; a key-scan op would be, and
+the engine still has none.
 
 Two smaller notes:
 
@@ -424,7 +430,7 @@ Store-level options (in `config/cache.php`):
 | --- | --- | --- |
 | `connection` | the default connection | which `rostam.connections.*` entry to use |
 | `prefix` | `cache.prefix` | key prefix |
-| `flush` | `'epoch'` | `'epoch'` or `'unsupported'` |
+| `flush` | `'epoch'` | `'epoch'`, `'server'` (rostam v0.6.0, wipes the WHOLE server) or `'unsupported'` |
 | `epoch_refresh` | `10` | seconds between generation re-reads; `0` every op, `-1` once per process |
 | `tag_refresh` | `300` | seconds before a tag id is rewritten so eviction does not reach it; `0` disables it |
 | `serializer` | `'php'` | `'php'`, `'igbinary'`, a registered name, or a class implementing `ValueSerializer` |
