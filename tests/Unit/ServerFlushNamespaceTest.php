@@ -1,0 +1,115 @@
+<?php
+
+// SPDX-License-Identifier: Apache-2.0
+
+declare(strict_types=1);
+
+namespace Rostam\Cache\Tests\Unit;
+
+use InvalidArgumentException;
+use PHPUnit\Framework\TestCase;
+use Rostam\Cache\Namespacing\GenerationalNamespace;
+use Rostam\Cache\Namespacing\ServerFlushNamespace;
+use Rostam\Cache\Namespacing\StaticNamespace;
+use Rostam\Cache\RostamStore;
+use Rostam\Cache\Session\RostamSessionHandler;
+use Rostam\Testing\ArrayKvClient;
+
+/**
+ * Rostam v0.6.0 added a real `flush`, and this is the strategy that uses it.
+ *
+ * The point of these tests is not that it clears the cache - that part is one
+ * line - but that it clears everything else too, and that the package says so
+ * in a test rather than only in a paragraph.
+ */
+class ServerFlushNamespaceTest extends TestCase
+{
+    private ArrayKvClient $client;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->client = new ArrayKvClient;
+    }
+
+    public function test_keys_are_bare(): void
+    {
+        $namespace = new ServerFlushNamespace($this->client, 'app:');
+
+        // No generation segment: nothing to look up, and the shortest key the
+        // prefix allows.
+        $this->assertSame('app:', $namespace->resolve());
+        $this->assertSame('app:greeting', $namespace->qualify('greeting'));
+    }
+
+    public function test_it_flushes_by_asking_the_server(): void
+    {
+        $store = RostamStore::make($this->client, 'app:', ['flush' => 'server']);
+
+        $store->put('greeting', 'salam', 600);
+        $this->assertSame('salam', $store->get('greeting'));
+
+        $this->assertTrue($store->flush());
+        $this->assertNull($store->get('greeting'));
+        $this->assertContains('flush', $this->client->ops);
+    }
+
+    /**
+     * The trade, stated as a test.
+     *
+     * A generational flush leaves sessions alone, which is the whole reason
+     * this package ships its own session handler. The server flush does not:
+     * one op, one keyspace, everything in it. Someone who reads only the
+     * config key would never guess, so it is pinned here.
+     */
+    public function test_the_server_flush_also_logs_every_user_out(): void
+    {
+        $sessions = new RostamSessionHandler($this->client, 'session:', 120);
+        $sessions->write('abc', 'user=42');
+
+        RostamStore::make($this->client, 'app:', ['flush' => 'server'])->flush();
+
+        $this->assertSame('', $sessions->read('abc'), 'this mode is supposed to take the sessions with it');
+    }
+
+    /** ...and the default still does not, which is the reason it is the default. */
+    public function test_the_default_generational_flush_still_spares_them(): void
+    {
+        $sessions = new RostamSessionHandler($this->client, 'session:', 120);
+        $sessions->write('abc', 'user=42');
+
+        RostamStore::make($this->client, 'app:', ['epoch_refresh' => 0])->flush();
+
+        $this->assertSame('user=42', $sessions->read('abc'));
+    }
+
+    public function test_every_mode_is_named(): void
+    {
+        $this->assertInstanceOf(GenerationalNamespace::class, $this->namespaceFor([]));
+        $this->assertInstanceOf(GenerationalNamespace::class, $this->namespaceFor(['flush' => 'epoch']));
+        $this->assertInstanceOf(ServerFlushNamespace::class, $this->namespaceFor(['flush' => 'server']));
+        $this->assertInstanceOf(StaticNamespace::class, $this->namespaceFor(['flush' => 'unsupported']));
+    }
+
+    /**
+     * A mode that does not exist used to mean "no flush at all": the factory
+     * asked whether the value was 'epoch' and sent everything else to the
+     * strategy that refuses. A typo therefore disabled cache:clear silently,
+     * and 'server' would have been one of those typos.
+     */
+    public function test_an_unknown_mode_is_refused_rather_than_guessed(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/unknown flush mode \[nonsense\]/');
+
+        RostamStore::make($this->client, 'app:', ['flush' => 'nonsense']);
+    }
+
+    private function namespaceFor(array $options): object
+    {
+        $store = RostamStore::make($this->client, 'app:', $options + ['epoch_refresh' => 0]);
+
+        return (new \ReflectionProperty($store, 'namespace'))->getValue($store);
+    }
+}

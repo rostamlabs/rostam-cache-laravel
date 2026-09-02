@@ -10,9 +10,11 @@ use Illuminate\Cache\TaggedCache;
 use Illuminate\Cache\TagSet;
 use Illuminate\Contracts\Cache\CanFlushLocks;
 use Illuminate\Contracts\Cache\LockProvider;
+use InvalidArgumentException;
 use Rostam\Cache\Contracts\CacheNamespace;
 use Rostam\Cache\Contracts\ValueSerializer;
 use Rostam\Cache\Namespacing\GenerationalNamespace;
+use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
 use Rostam\Cache\Serialization\PhpSerializer;
 use Rostam\Cache\Support\Generation;
@@ -88,8 +90,10 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
     /**
      * Assemble a store the ordinary way.
      *
-     * @param  array<string, mixed>  $options  flush: 'epoch'|'unsupported', epoch_refresh: seconds,
+     * @param  array<string, mixed>  $options  flush: 'epoch'|'server'|'unsupported', epoch_refresh: seconds,
      *                                         tag_refresh: seconds before a tag id is rewritten to stay young
+     *
+     * @throws InvalidArgumentException on a flush mode that does not exist
      */
     public static function make(
         KvClient $client,
@@ -101,9 +105,19 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
 
         return new self(
             $client,
-            ($options['flush'] ?? 'epoch') === 'epoch'
-                ? new GenerationalNamespace($registry, $prefix)
-                : new StaticNamespace($prefix),
+            // Named, not defaulted-through. This used to be "epoch, or else
+            // static", so a typo picked the strategy that quietly refuses to
+            // flush - and a store configured with 'server' would have been one
+            // of those typos.
+            match ($mode = (string) ($options['flush'] ?? 'epoch')) {
+                'epoch' => new GenerationalNamespace($registry, $prefix),
+                'server' => new ServerFlushNamespace($client, $prefix),
+                'unsupported' => new StaticNamespace($prefix),
+                default => throw new InvalidArgumentException(
+                    "unknown flush mode [{$mode}]: expected 'epoch' (a generation number, the default), "
+                    ."'server' (Rostam v0.6.0's flush op, which wipes the WHOLE server) or 'unsupported'."
+                ),
+            },
             $serializer ?? new PhpSerializer,
             $registry->generation($prefix.'#lock-epoch'),
             (int) ($options['tag_refresh'] ?? 300),
