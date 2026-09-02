@@ -444,6 +444,16 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
      * {@see flush()} bumps this counter when that happens, because a counter
      * that came back as zero would be a second lock namespace rather than a
      * cleared one.
+     *
+     * What that bump does NOT do - and neither does `cache:clear --locks`, for
+     * the same reason - is reach into a process that has the previous number
+     * cached. Such a process keeps taking locks under it until its own
+     * `epoch_refresh` lapses, and during that window a lock it holds is
+     * invisible to everyone else. The bump is what keeps the window bounded by
+     * that setting instead of unbounded: the counter only ever moves up, so
+     * every process converges on the highest value it has seen. With
+     * `epoch_refresh => -1` there is no such window because there is no
+     * re-read, which is the price that setting names.
      */
     protected function lockKey(string $name): string
     {

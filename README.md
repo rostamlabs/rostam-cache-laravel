@@ -216,6 +216,16 @@ The generation is re-read from the server at most every `epoch_refresh` seconds
 another process has already flushed — set it to `0` to check on every operation
 (one extra round trip each), or `-1` to read it once per process.
 
+**It bounds the locks too, and there the stake is different.** Locks carry a
+generation of their own, so the same window applies to `cache:clear --locks`
+and to a `'server'` flush: for up to `epoch_refresh` seconds a process that has
+not re-read yet keeps taking locks under the previous number, where a process
+that has cannot see them. That is not stale data but a mutex two processes can
+hold at once. The default bounds it at ten seconds; `0` closes it at the cost of
+a round trip per acquisition; **`-1` never closes it** — a process pinned that
+way will not observe a lock generation change for as long as it runs, which is
+what "once per process" means when the counter in question guards a lock.
+
 Set `'flush' => 'unsupported'` to drop the generation segment entirely;
 `flush()` then throws instead of pretending.
 

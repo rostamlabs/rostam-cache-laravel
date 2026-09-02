@@ -131,6 +131,39 @@ class ServerFlushNamespaceTest extends TestCase
     }
 
     /**
+     * The invariant the whole arrangement rests on: the counter only moves up.
+     *
+     * It is what bounds the window rather than closing it. A process that has
+     * the previous number cached keeps using it until its own refresh - that is
+     * true of `cache:clear --locks` too - but because the value never goes
+     * down, every process converges on the highest one it has seen. Let it come
+     * back as zero and there is nothing to converge on: the old number stays in
+     * use alongside it, indefinitely.
+     */
+    public function test_the_lock_counter_never_moves_down(): void
+    {
+        $options = ['flush' => 'server', 'epoch_refresh' => 0];
+        $store = RostamStore::make($this->client, 'app:', $options);
+
+        $store->flushLocks();
+        $store->flushLocks();
+        $before = $this->lockGeneration($store);
+
+        $store->flush();
+
+        $this->assertGreaterThan($before, $this->lockGeneration($store));
+
+        // ...and on the server, not merely in this process's cache.
+        $fresh = RostamStore::make($this->client, 'app:', $options);
+        $this->assertGreaterThan($before, $this->lockGeneration($fresh));
+    }
+
+    private function lockGeneration(RostamStore $store): int
+    {
+        return (new \ReflectionProperty($store, 'lockGeneration'))->getValue($store)->current();
+    }
+
+    /**
      * A CacheNamespace written before v0.6.0 has to keep working.
      *
      * The fact that a flush is server-wide arrived as its own interface rather
