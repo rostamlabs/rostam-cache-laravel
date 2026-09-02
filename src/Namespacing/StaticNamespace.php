@@ -45,12 +45,6 @@ final class StaticNamespace implements CacheNamespace
         );
     }
 
-    /** It never flushes at all. */
-    public function flushWipesTheServer(): bool
-    {
-        return false;
-    }
-
     public function supportsFlush(): bool
     {
         return false;

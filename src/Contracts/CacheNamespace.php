@@ -21,8 +21,13 @@ use Rostam\Exceptions\RostamException;
  * {@see StaticNamespace} keeps keys bare and
  * refuses to pretend it can flush; {@see ServerFlushNamespace} calls rostam
  * v0.6.0's own `flush`, which wipes the entire server and is opt-in for that
- * reason. That third one is the proof of the arrangement: the engine grew an op
- * and the store did not change a line.
+ * reason. That third one is close to the proof of the arrangement: the engine
+ * grew an op and the key shape, the flush policy and the store's own methods
+ * did not move. What the store did have to learn is one fact this interface
+ * cannot express - that such a flush also destroys the LOCK counter, which
+ * lives outside any namespace - and it learns it from {@see WipesTheServer}
+ * rather than from a method here, so an implementation written before v0.6.0
+ * keeps loading.
  */
 interface CacheNamespace
 {
@@ -52,17 +57,6 @@ interface CacheNamespace
     public function flush(): void;
 
     public function supportsFlush(): bool;
-
-    /**
-     * Whether flush() takes the whole server with it, not just these keys.
-     *
-     * True only for the strategy built on rostam's own `flush` op, which has no
-     * unit smaller than the keyspace. The store needs to know because locks
-     * live outside this namespace on purpose and carry a counter of their own:
-     * a wipe deletes that counter, and a counter that comes back as zero is a
-     * second lock namespace running alongside the first.
-     */
-    public function flushWipesTheServer(): bool;
 
     /**
      * Drop any cached state, so the next key re-reads it from the server.

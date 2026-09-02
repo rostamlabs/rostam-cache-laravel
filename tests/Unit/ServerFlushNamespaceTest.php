@@ -8,11 +8,14 @@ namespace Rostam\Cache\Tests\Unit;
 
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Rostam\Cache\Contracts\CacheNamespace;
 use Rostam\Cache\Namespacing\GenerationalNamespace;
 use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
 use Rostam\Cache\RostamStore;
+use Rostam\Cache\Serialization\PhpSerializer;
 use Rostam\Cache\Session\RostamSessionHandler;
+use Rostam\Cache\Support\GenerationRegistry;
 use Rostam\Testing\ArrayKvClient;
 
 /**
@@ -125,6 +128,66 @@ class ServerFlushNamespaceTest extends TestCase
         $method = new \ReflectionMethod($store, 'lockKey');
 
         return $method->invoke($store, $name);
+    }
+
+    /**
+     * A CacheNamespace written before v0.6.0 has to keep working.
+     *
+     * The fact that a flush is server-wide arrived as its own interface rather
+     * than a method on CacheNamespace for one reason: PHP resolves an
+     * implemented interface eagerly, so a method added to a published one is
+     * not a deprecation but a fatal error the next time somebody's class is
+     * autoloaded. This class implements the contract as it stood, knows nothing
+     * about WipesTheServer, and must both load and be treated as not wiping.
+     */
+    public function test_a_namespace_written_before_all_this_still_works(): void
+    {
+        $namespace = new class implements CacheNamespace
+        {
+            public function prefix(): string
+            {
+                return 'legacy:';
+            }
+
+            public function resolve(): string
+            {
+                return 'legacy:';
+            }
+
+            public function qualify(string $key): string
+            {
+                return 'legacy:'.$key;
+            }
+
+            public function flush(): void {}
+
+            public function supportsFlush(): bool
+            {
+                return true;
+            }
+
+            public function reset(): void {}
+
+            public function withPrefix(string $prefix): static
+            {
+                return $this;
+            }
+        };
+
+        $store = new RostamStore(
+            $this->client,
+            $namespace,
+            new PhpSerializer,
+            (new GenerationRegistry($this->client, 0))->generation('legacy:#lock-epoch'),
+        );
+
+        $store->flushLocks();
+        $before = $this->lockKey($store, 'deploy');
+
+        $store->flush();
+
+        $this->assertSame($before, $this->lockKey($store, 'deploy'),
+            'a namespace that does not wipe the server had its lock generation bumped anyway');
     }
 
     public function test_every_mode_is_named(): void

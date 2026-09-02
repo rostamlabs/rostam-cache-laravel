@@ -13,6 +13,7 @@ use Illuminate\Contracts\Cache\LockProvider;
 use InvalidArgumentException;
 use Rostam\Cache\Contracts\CacheNamespace;
 use Rostam\Cache\Contracts\ValueSerializer;
+use Rostam\Cache\Contracts\WipesTheServer;
 use Rostam\Cache\Namespacing\GenerationalNamespace;
 use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
@@ -349,7 +350,7 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
         // there was - and it puts the counter back above the value this process
         // had, which every other process then converges up to on its next read
         // because generations only ever advance.
-        if ($this->namespace->flushWipesTheServer()) {
+        if ($this->namespace instanceof WipesTheServer) {
             $this->lockGeneration->bump();
         }
 

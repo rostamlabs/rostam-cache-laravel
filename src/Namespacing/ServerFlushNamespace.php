@@ -7,6 +7,7 @@ declare(strict_types=1);
 namespace Rostam\Cache\Namespacing;
 
 use Rostam\Cache\Contracts\CacheNamespace;
+use Rostam\Cache\Contracts\WipesTheServer;
 use Rostam\Cache\Session\RostamSessionHandler;
 use Rostam\Contracts\KvClient;
 
@@ -35,7 +36,7 @@ use Rostam\Contracts\KvClient;
  * memory instead of leaving the old entries resident but unreachable until
  * their TTL or eviction gets to them.
  */
-final class ServerFlushNamespace implements CacheNamespace
+final class ServerFlushNamespace implements CacheNamespace, WipesTheServer
 {
     public function __construct(
         private readonly KvClient $client,
@@ -63,12 +64,6 @@ final class ServerFlushNamespace implements CacheNamespace
     public function flush(): void
     {
         $this->client->flush();
-    }
-
-    /** The whole point of this strategy, and the reason to think before choosing it. */
-    public function flushWipesTheServer(): bool
-    {
-        return true;
     }
 
     public function supportsFlush(): bool
