@@ -10,9 +10,12 @@ use Illuminate\Cache\TaggedCache;
 use Illuminate\Cache\TagSet;
 use Illuminate\Contracts\Cache\CanFlushLocks;
 use Illuminate\Contracts\Cache\LockProvider;
+use InvalidArgumentException;
 use Rostam\Cache\Contracts\CacheNamespace;
 use Rostam\Cache\Contracts\ValueSerializer;
+use Rostam\Cache\Contracts\WipesTheServer;
 use Rostam\Cache\Namespacing\GenerationalNamespace;
+use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
 use Rostam\Cache\Serialization\PhpSerializer;
 use Rostam\Cache\Support\Generation;
@@ -30,10 +33,12 @@ use Rostam\Exceptions\ServerException;
  * - the wire is a {@see KvClient}, so a fake transport is a constructor argument;
  * - the value encoding is a {@see ValueSerializer}, so igbinary (or anything
  *   else) is a swap rather than a subclass;
- * - what a key looks like and what "flush" means is a {@see CacheNamespace}, so
- *   the day Rostam grows a key-scan op, a third implementation is the change;
+ * - what a key looks like and what "flush" means is a {@see CacheNamespace},
+ *   which is why rostam v0.6.0's flush op arrived here as a third
+ *   implementation and not as a branch in this class;
  * - lock lifetimes hang off their own {@see Generation}, which is why
- *   `cache:clear` cannot release a running mutex while `cache:clear --locks`
+ *   `cache:clear` cannot release a running mutex (except in 'server' flush
+ *   mode, where the wipe reaches everything) while `cache:clear --locks`
  *   can.
  *
  * {@see self::make()} wires the usual combination; the constructor is there for
@@ -88,8 +93,10 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
     /**
      * Assemble a store the ordinary way.
      *
-     * @param  array<string, mixed>  $options  flush: 'epoch'|'unsupported', epoch_refresh: seconds,
+     * @param  array<string, mixed>  $options  flush: 'epoch'|'server'|'unsupported', epoch_refresh: seconds,
      *                                         tag_refresh: seconds before a tag id is rewritten to stay young
+     *
+     * @throws InvalidArgumentException on a flush mode that does not exist
      */
     public static function make(
         KvClient $client,
@@ -101,9 +108,19 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
 
         return new self(
             $client,
-            ($options['flush'] ?? 'epoch') === 'epoch'
-                ? new GenerationalNamespace($registry, $prefix)
-                : new StaticNamespace($prefix),
+            // Named, not defaulted-through. This used to be "epoch, or else
+            // static", so a typo picked the strategy that quietly refuses to
+            // flush - and a store configured with 'server' would have been one
+            // of those typos.
+            match ($mode = (string) ($options['flush'] ?? 'epoch')) {
+                'epoch' => new GenerationalNamespace($registry, $prefix),
+                'server' => new ServerFlushNamespace($client, $prefix),
+                'unsupported' => new StaticNamespace($prefix),
+                default => throw new InvalidArgumentException(
+                    "unknown flush mode [{$mode}]: expected 'epoch' (a generation number, the default), "
+                    ."'server' (Rostam v0.6.0's flush op, which wipes the WHOLE server) or 'unsupported'."
+                ),
+            },
             $serializer ?? new PhpSerializer,
             $registry->generation($prefix.'#lock-epoch'),
             (int) ($options['tag_refresh'] ?? 300),
@@ -322,6 +339,21 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
     {
         $this->namespace->flush();
 
+        // A server-wide flush deletes the lock counter along with everything
+        // else, and a deleted counter reads back as zero. That is the one
+        // direction it must never move: a process that still has the old number
+        // cached would keep taking locks under it while a freshly started one
+        // took them under zero, and the same mutex would be held twice with
+        // neither side able to see the other.
+        //
+        // Bumping is also simply what happened - the wipe released every lock
+        // there was - and it puts the counter back above the value this process
+        // had, which every other process then converges up to on its next read
+        // because generations only ever advance.
+        if ($this->namespace instanceof WipesTheServer) {
+            $this->lockGeneration->bump();
+        }
+
         return true;
     }
 
@@ -406,6 +438,28 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
      * Locks live outside the cache generation on purpose: `cache:clear` should
      * not silently hand a running mutex to a second process. They carry their
      * own generation so `cache:clear --locks` still has something to bump.
+     *
+     * The exception is a store on `'flush' => 'server'`, where a flush is the
+     * engine's own and spares nothing: the lock keys go with everything else.
+     * {@see flush()} bumps this counter when that happens, because a counter
+     * that came back as zero would be a second lock namespace rather than a
+     * cleared one.
+     *
+     * What that bump does NOT do - and neither does `cache:clear --locks`, for
+     * the same reason - is reach into a process that has the previous number
+     * cached. Such a process keeps taking locks under it until its own
+     * `epoch_refresh` lapses, and during that window a lock it holds is
+     * invisible to everyone else. The bump is what keeps the window bounded by
+     * that setting instead of unbounded: the counter only ever moves up, so
+     * every process converges on the highest value it has seen. With
+     * `epoch_refresh => -1` that window never closes at all, because there is
+     * no re-read; that is the price the setting names.
+     *
+     * Nor does any refresh setting move a {@see RostamLock} that already
+     * exists: this method runs once, in {@see lock()}, and the object keeps the
+     * key it was handed. The key has to be stable between `acquire()` and
+     * `release()` - re-resolving between them would release a key the object
+     * never wrote - so a lock held across a flush stays where it was built.
      */
     protected function lockKey(string $name): string
     {

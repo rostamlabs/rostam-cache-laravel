@@ -37,8 +37,11 @@ final class StaticNamespace implements CacheNamespace
     public function flush(): void
     {
         throw new RostamException(
-            'flush() is disabled for this store: Rostam has no KEYS/FLUSHDB op, so clearing the '
-            ."cache needs the generation-number strategy. Set the store's 'flush' option to 'epoch'."
+            'flush() is disabled for this store. Rostam has no KEYS or SCAN, so clearing only '
+            ."this store's keys needs the generation-number strategy: set 'flush' => 'epoch'. It does "
+            .'have a flush op since v0.6.0, but it wipes the WHOLE server - every other store, the '
+            ."sessions and any accepted queued jobs - so 'flush' => 'server' is only for an instance "
+            .'that belongs to this cache alone.'
         );
     }
 

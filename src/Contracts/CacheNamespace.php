@@ -6,6 +6,7 @@ declare(strict_types=1);
 namespace Rostam\Cache\Contracts;
 
 use Rostam\Cache\Namespacing\GenerationalNamespace;
+use Rostam\Cache\Namespacing\ServerFlushNamespace;
 use Rostam\Cache\Namespacing\StaticNamespace;
 use Rostam\Exceptions\RostamException;
 
@@ -18,8 +19,15 @@ use Rostam\Exceptions\RostamException;
  * {@see GenerationalNamespace} folds a generation
  * number into every key and bumps it to flush;
  * {@see StaticNamespace} keeps keys bare and
- * refuses to pretend it can flush. If the engine ever grows a key-scan op, a
- * third implementation is the whole change.
+ * refuses to pretend it can flush; {@see ServerFlushNamespace} calls rostam
+ * v0.6.0's own `flush`, which wipes the entire server and is opt-in for that
+ * reason. That third one is close to the proof of the arrangement: the engine
+ * grew an op and the key shape, the flush policy and the store's own methods
+ * did not move. What the store did have to learn is one fact this interface
+ * cannot express - that such a flush also destroys the LOCK counter, which
+ * lives outside any namespace - and it learns it from {@see WipesTheServer}
+ * rather than from a method here, so an implementation written before v0.6.0
+ * keeps loading.
  */
 interface CacheNamespace
 {

@@ -20,6 +20,7 @@ token auth, with no extensions beyond core streams.
   the advisory check turned off. Claiming it would promise something you
   cannot actually install.
 - **Rostam v0.5.0 or newer**, started with a `-tcp` listener
+  (**v0.6.0** for the optional `'flush' => 'server'` mode)
 
 v0.5.0 is where the conditional writes (`set_nx`, `cas`, `cad`, `caex`) and
 `incr_ex` landed. They are what make `add()` atomic, locks Redis-grade, and
@@ -182,9 +183,23 @@ own instead, which is what `php artisan cache:clear --locks` bumps.
 
 ### Flushing
 
-This is the one place Rostam still cannot do what Redis does. There is no
-`KEYS`, `SCAN` or `FLUSHDB`, so a literal flush is impossible. Instead every key
-is written under a generation number:
+Rostam v0.6.0 added a `flush` op, but it is not `FLUSHDB`: it has no smaller
+unit than the whole server. Three modes, and the default is still the
+generational one for that reason.
+
+| `'flush' =>` | what `Cache::flush()` does | keys |
+| --- | --- | --- |
+| `'epoch'` *(default)* | bumps a generation number, abandoning this store's keys | carry a generation segment |
+| `'server'` | sends Rostam's `flush` — **wipes the entire server** | bare |
+| `'unsupported'` | throws, rather than pretend | bare |
+
+Anything else is refused at construction rather than quietly treated as
+`'unsupported'`, which is what a typo used to do.
+
+#### The default: a generation number
+
+There is no `KEYS` or `SCAN`, so clearing only *this store's* keys is impossible
+in one op. Instead every key is written under a generation number:
 
 ```
 laravel_cache:0:user:1
@@ -201,8 +216,47 @@ The generation is re-read from the server at most every `epoch_refresh` seconds
 another process has already flushed — set it to `0` to check on every operation
 (one extra round trip each), or `-1` to read it once per process.
 
-Set `'flush' => 'unsupported'` on the store to drop the generation segment
-entirely; `flush()` then throws instead of pretending.
+**It bounds the locks too, and there the stake is different.** Locks carry a
+generation of their own, so the same window applies to `cache:clear --locks`
+and to a `'server'` flush: for up to `epoch_refresh` seconds a process that has
+not re-read yet keeps taking locks under the previous number, where a process
+that has cannot see them. That is not stale data but a mutex two processes can
+hold at once. The default bounds it at ten seconds; `0` narrows it to a single
+round trip; **`-1` never closes it** — a process pinned that way will not observe
+a lock generation change for as long as it runs, which is what "once per
+process" means when the counter in question guards a lock.
+
+**A `Lock` object resolves its generation once, when you ask for it.** So
+`epoch_refresh` bounds when a *new* lock lands in the new namespace, not when
+an existing object does: hold on to one across a `cache:clear --locks` and it
+keeps acquiring under the number it was built with, however low you set the
+refresh. That is deliberate rather than an oversight — the key has to be the
+same for `acquire()` and for `release()`, and re-resolving between them would
+release a key this object never wrote and leave the real one to expire on its
+TTL. Ask for the lock where you use it, which is what `Cache::lock(...)->get()`
+already does; a long-lived `Lock` held in a property is the shape to avoid.
+
+Set `'flush' => 'unsupported'` to drop the generation segment entirely;
+`flush()` then throws instead of pretending.
+
+#### `'server'`: the real op, and the whole server with it
+
+Requires **Rostam v0.6.0**. It buys bare keys, no generation to look up or keep
+fresh, and a flush that actually reclaims the memory rather than leaving the old
+entries resident but unreachable. What it costs, measured against v0.6.0:
+
+    put app:a, put session:b
+    flush                       (sent carrying the key `app:`)
+    app:a      -> not found
+    session:b  -> not found     <- the argument scoped nothing
+
+`php artisan cache:clear` on that store therefore also clears every other cache
+store on the same server, **every session** — including the ones the session
+driver below keeps out of a generational flush's reach — and any queued jobs
+that had already been accepted. Vector collections are a separate keyspace and
+survive; that was measured too.
+
+Choose it when the Rostam instance belongs to this cache and you mean all of it.
 
 ## Sessions
 
@@ -222,6 +276,10 @@ one looking for a Rostam connection by that name.
 rather than quietly turned into some other number. If you want the session to end
 when the browser closes, that is `session.expire_on_close`, a cookie setting, and
 it leaves this lifetime alone.
+
+(If you set the cache store's `'flush' => 'server'`, none of what follows
+protects you: that mode wipes the whole keyspace, sessions included. The two
+are safe together only when sessions live on a *different* Rostam server.)
 
 **Do not point `session.store` at the Rostam cache store instead.** It appears to
 work, and it logs every user out the first time anything flushes that store —
@@ -303,10 +361,16 @@ The full `Illuminate\Contracts\Cache\Store` surface is implemented — `get`,
 | `php artisan cache:clear` / `cache:forget` / `cache:clear --locks` | ✅ |
 | `SESSION_DRIVER=cache`, cached config/routes, `Cache::memo()` | ✅ |
 
-**One difference from Redis remains**, and it comes from the engine rather than
-this package: `flush()` is generational, not a wipe. Old data is abandoned
-rather than deleted, and other processes see the flush after at most
-`epoch_refresh` seconds. If Rostam ever grows a key-scan op, this goes away too.
+**One difference from Redis remains** on the default settings, and it comes
+from the engine rather than this package: `flush()` is generational, not a wipe.
+Old data is abandoned rather than deleted, and other processes see the flush
+after at most `epoch_refresh` seconds.
+
+`'flush' => 'server'` removes that difference and introduces a larger one in its
+place: rostam's own `flush` really does delete, but it deletes the entire server
+rather than this store — every other store on it, the sessions and any accepted
+queued jobs included. Neither is Redis's `FLUSHDB`; a key-scan op would be, and
+the engine still has none.
 
 Two smaller notes:
 
@@ -386,7 +450,7 @@ Store-level options (in `config/cache.php`):
 | --- | --- | --- |
 | `connection` | the default connection | which `rostam.connections.*` entry to use |
 | `prefix` | `cache.prefix` | key prefix |
-| `flush` | `'epoch'` | `'epoch'` or `'unsupported'` |
+| `flush` | `'epoch'` | `'epoch'`, `'server'` (rostam v0.6.0, wipes the WHOLE server) or `'unsupported'` |
 | `epoch_refresh` | `10` | seconds between generation re-reads; `0` every op, `-1` once per process |
 | `tag_refresh` | `300` | seconds before a tag id is rewritten so eviction does not reach it; `0` disables it |
 | `serializer` | `'php'` | `'php'`, `'igbinary'`, a registered name, or a class implementing `ValueSerializer` |
