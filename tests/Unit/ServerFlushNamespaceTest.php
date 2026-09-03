@@ -164,6 +164,55 @@ class ServerFlushNamespaceTest extends TestCase
     }
 
     /**
+     * A Lock resolves its generation once, when it is asked for.
+     *
+     * So no `epoch_refresh` setting moves an object that already exists: hold
+     * one across a `cache:clear --locks` and it keeps acquiring under the
+     * number it was built with, while anyone asking for that lock afterwards
+     * gets a different key and takes it freely. That is the hazard, stated in
+     * the README rather than hidden.
+     *
+     * It is also why the design is right: the key has to be stable between
+     * acquire() and release(). Re-resolving between them would release a key
+     * this object never wrote and leave the real one to expire on its TTL.
+     *
+     * `flushLocks()` rather than a server flush, deliberately - a server flush
+     * deletes the lock keys outright, which answers a different question.
+     */
+    public function test_a_lock_keeps_the_key_it_was_built_with(): void
+    {
+        // The tightest refresh there is: if anything could move an existing
+        // object into the new namespace, it would be this.
+        $store = RostamStore::make($this->client, 'app:', ['epoch_refresh' => 0]);
+
+        $held = $store->lock('deploy', 60);
+        $this->assertTrue($held->get());
+        $before = $this->keyOf($held);
+
+        $store->flushLocks();
+
+        // Anyone asking now is somewhere else, and finds it free - which is
+        // exactly the mutex two processes can hold at once.
+        $after = $store->lock('deploy', 60);
+        $this->assertNotSame($before, $this->keyOf($after), 'the bump did not move new locks');
+        $this->assertTrue($after->get(), 'the new namespace should be free');
+
+        // The one already held is unmoved, and releases itself rather than the
+        // stranger that now holds the name.
+        $this->assertSame($before, $this->keyOf($held));
+        $this->assertTrue($held->release());
+        $this->assertNotNull(
+            $this->client->get($this->keyOf($after)),
+            'releasing the held lock deleted the stranger that now holds the name'
+        );
+    }
+
+    private function keyOf(object $lock): string
+    {
+        return (new \ReflectionProperty($lock, 'name'))->getValue($lock);
+    }
+
+    /**
      * A CacheNamespace written before v0.6.0 has to keep working.
      *
      * The fact that a flush is server-wide arrived as its own interface rather

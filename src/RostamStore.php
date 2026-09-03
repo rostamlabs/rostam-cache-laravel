@@ -452,8 +452,14 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
      * invisible to everyone else. The bump is what keeps the window bounded by
      * that setting instead of unbounded: the counter only ever moves up, so
      * every process converges on the highest value it has seen. With
-     * With `epoch_refresh => -1` that window never closes because there is no
-     * re-read, which is the price that setting names.
+     * `epoch_refresh => -1` that window never closes at all, because there is
+     * no re-read; that is the price the setting names.
+     *
+     * Nor does any refresh setting move a {@see RostamLock} that already
+     * exists: this method runs once, in {@see lock()}, and the object keeps the
+     * key it was handed. The key has to be stable between `acquire()` and
+     * `release()` - re-resolving between them would release a key the object
+     * never wrote - so a lock held across a flush stays where it was built.
      */
     protected function lockKey(string $name): string
     {

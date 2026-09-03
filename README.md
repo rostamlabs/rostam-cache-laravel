@@ -221,10 +221,20 @@ generation of their own, so the same window applies to `cache:clear --locks`
 and to a `'server'` flush: for up to `epoch_refresh` seconds a process that has
 not re-read yet keeps taking locks under the previous number, where a process
 that has cannot see them. That is not stale data but a mutex two processes can
-hold at once. The default bounds it at ten seconds; `0` closes it at the cost of
-a round trip per acquisition; **`-1` never closes it** — a process pinned that
-way will not observe a lock generation change for as long as it runs, which is
-what "once per process" means when the counter in question guards a lock.
+hold at once. The default bounds it at ten seconds; `0` narrows it to a single
+round trip; **`-1` never closes it** — a process pinned that way will not observe
+a lock generation change for as long as it runs, which is what "once per
+process" means when the counter in question guards a lock.
+
+**A `Lock` object resolves its generation once, when you ask for it.** So
+`epoch_refresh` bounds when a *new* lock lands in the new namespace, not when
+an existing object does: hold on to one across a `cache:clear --locks` and it
+keeps acquiring under the number it was built with, however low you set the
+refresh. That is deliberate rather than an oversight — the key has to be the
+same for `acquire()` and for `release()`, and re-resolving between them would
+release a key this object never wrote and leave the real one to expire on its
+TTL. Ask for the lock where you use it, which is what `Cache::lock(...)->get()`
+already does; a long-lived `Lock` held in a property is the shape to avoid.
 
 Set `'flush' => 'unsupported'` to drop the generation segment entirely;
 `flush()` then throws instead of pretending.
