@@ -17,7 +17,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "rostamlabs/rostam-client-php": "^0.1",
+        "rostamlabs/rostam-client-php": "^0.2",
         "illuminate/cache": "^12.0|^13.0",
         "illuminate/console": "^12.0|^13.0",
         "illuminate/contracts": "^12.0|^13.0",

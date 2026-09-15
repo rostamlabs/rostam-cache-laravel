@@ -32,6 +32,12 @@ use SessionHandlerInterface;
  * user is suddenly logged out. So sessions live under their own prefix with no
  * generation in it, which puts them out of reach of any store's flush.
  *
+ * One exception, and it is a configuration rather than a bug: a store set to
+ * `'flush' => 'server'` uses rostam v0.6.0's `flush` op, which has no unit
+ * smaller than the whole keyspace and takes these sessions with it. Nothing
+ * here can prevent that - the op does not accept a scope - so the two belong on
+ * different servers if you want both.
+ *
  * There is no gc() to write: every session is stored with its lifetime as a
  * TTL, and the engine expires them itself.
  */

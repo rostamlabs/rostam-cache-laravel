@@ -41,6 +41,7 @@ use Rostam\TimeUnit;
  * @method static bool expire(string $key, int $ttl, TimeUnit $unit = TimeUnit::Seconds)
  * @method static bool persist(string $key)
  * @method static int ttl(string $key, TimeUnit $unit = TimeUnit::Seconds)
+ * @method static void flush() wipes the WHOLE server keyspace, not just this prefix (rostam v0.6.0+)
  * @method static bool ping()
  * @method static void set(string $key, string $value, int $ttl = 0, TimeUnit $unit = TimeUnit::Seconds)
  * @method static void setex(string $key, int $seconds, string $value)
