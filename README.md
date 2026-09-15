@@ -319,20 +319,42 @@ a TTL and the engine expires it.
 
 ## What eviction costs you
 
-A single-node `rostam-server` **always evicts** at capacity (`PolicyRingbufEvict`),
-and nothing in its flags or config changes that; only replicated shards refuse
-writes instead. It overwrites **the oldest entries in the oldest page**. That is
-write order, not LRU - reading a key does not keep it alive. Redis defaults to
-`noeviction`, so two things that are theoretical there are real here.
+A single-node `rostam-server` **evicts rather than refusing a write** — nothing in
+its flags or config makes it refuse; only replicated shards do that. By default it
+overwrites **the oldest entries in the oldest page**: write order, not LRU, so
+reading a key does not keep it alive, and a key that merely waits while other
+writes churn past it goes when the buffer wraps, however much room the node has.
+Redis defaults to `noeviction`, so two things that are theoretical there are real
+here.
+
+Opt-in server flags change *what* is evicted, never *whether* — and none of them
+is a guarantee:
+
+- **`-relocating-eviction`** copies a page's still-live records forward instead of
+  dropping them with it. Best-effort by design: it never allocates a page, never
+  triggers another eviction and never fails a write, so a record that does not fit
+  the room left over "is simply left to be dropped". Measured on v0.7.0-beta7 with
+  a 32 MiB budget, put/delete churn of ten times the budget: by default two
+  untouched keys were evicted with nothing else live; with this flag both survived.
+- **`-sieve-visited-bit`**, which needs the flag above, spares records read or
+  rewritten since eviction last passed them — with the pair, reading a key does
+  keep it alive.
+- **`-in-place-same-size-update`** cuts the other way: a rewritten key stops moving
+  to the newest page, so a hot key is evicted on the same schedule as a cold one.
+
+All of them are single-node only; under `-cluster` they do nothing.
 
 Every write still answers success when it pushes something else out. Measured on
-v0.7.0-beta6 with a 256 MiB budget, 400 one-megabyte writes all succeeded and 235
-read back. On v0.7.0-beta3 and newer the server counts it, and you can read the
-count:
+v0.7.0-beta6 with a 256 MiB budget on one shard, 400 writes of 1,000,000 bytes all
+succeeded and 235 read back. On v0.7.0-beta3 and newer the server counts it, and
+you can read the count:
 
 ```php
-Rostam::kvMetrics()->evictionsLive();   // live records displaced since the server started
+Rostam::kvMetrics()->evictionsLive();   // live records displaced since the server started, or null
 ```
+
+`null` means the server does not report that counter — anything older than
+v0.7.0-beta3 — and is not the same answer as zero.
 
 For a cache that number is a miss rate. Anything on the same server that must not
 be lost - queued jobs, sessions you cannot afford to drop - needs a server that
@@ -371,13 +393,16 @@ against.
 
 ## How large a value can be
 
-A value has to fit in one page of the server's cache, and the page size follows
-from `max_memory` divided across the shards. On a default single-node server that
-is **about 1 MiB** (1,048,544 bytes on v0.6.0 and 1,048,540 on v0.7.0-beta6, on
-the same machine) - far below the 16 MiB a request frame may carry. A larger
-`put` fails with the server's generic `internal error`, thrown as a
-`ServerException`. Fewer shards or a larger `max_memory` raise it; serialized
-collections and rendered pages are what usually reach it.
+An entry has to fit in one page of the server's cache, and the page bounds **the
+key and the value together**. The page size follows from `max_memory` divided
+across the shards; on a default single-node server `strlen($key) + strlen($value)`
+reached **1,048,550 bytes on v0.6.0** and **1,048,546 on v0.7.0-beta6 and beta7**,
+measured on the same machine and constant across key lengths - far below the
+16 MiB a request frame may carry. The key is the whole key this driver writes,
+prefix, generation and tag segments included, so a long key leaves that much less
+for the value. A larger entry fails with the server's generic `internal error`,
+thrown as a `ServerException`. Fewer shards or a larger `max_memory` raise it;
+serialized collections and rendered pages are what usually reach it.
 
 ## Compatibility
 
@@ -423,9 +448,9 @@ passing a different object rather than forking one:
 
 | Seam | Interface | Ships with | Swap it to… |
 | --- | --- | --- | --- |
-| Transport | `Contracts\Client` | `Client\TcpClient` | instrument, fail over, or fake the wire |
+| Transport | `Rostam\Contracts\KvClient` | `Rostam\Kv\TcpClient` | instrument, fail over, or fake the wire |
 | Value encoding | `Contracts\ValueSerializer` | `PhpSerializer`, `IgbinarySerializer` | msgpack, compression, encryption |
-| Keys and flushing | `Contracts\CacheNamespace` | `GenerationalNamespace`, `StaticNamespace` | a real key-scan flush, if Rostam grows one |
+| Keys and flushing | `Contracts\CacheNamespace` | `GenerationalNamespace`, `StaticNamespace`, `ServerFlushNamespace` | a real key-scan flush, if Rostam grows one |
 
 Registering your own, from any service provider:
 
@@ -475,6 +500,7 @@ new RostamStore($client, $namespace, $serializer, $lockGeneration);
 | `timeout` | `5.0` | seconds for each read and write |
 | `pool_size` | `4` | idle sockets kept per connection |
 | `persistent` | `false` | PHP persistent sockets, kept by the worker across requests |
+| `topology` | `'unknown'` | `'single-node'` lets batch writes go as one `put_batch` instead of a pipeline — measured through `putMany()`, 2,000 entries in 6.8 ms against 118.3 ms. The op routes by its first key, so on a cluster it would strand every other shard's keys: the client checks the declaration against the server and throws `TopologyMismatchException` before writing anything. A value that is neither is refused when the connection is built |
 | `retry_on_stale_connection` | `true` | re-send an idempotent op once when a pooled socket turns out to have been closed while idle |
 | `tls.enabled` | `false` | wrap the connection in TLS |
 | `tls.ca` / `tls.cert` / `tls.key` | `null` | CA bundle and client certificate for mTLS |

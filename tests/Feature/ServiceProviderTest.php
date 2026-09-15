@@ -202,7 +202,32 @@ class ServiceProviderTest extends TestCase
     {
         config()->set('rostam.connections.dead', ['host' => '127.0.0.1', 'port' => 1, 'connect_timeout' => 0.5]);
 
-        $this->artisan('rostam:ping --connection=dead')->assertFailed();
+        $this->artisan('rostam:ping --connection=dead')
+            ->expectsOutputToContain('unreachable')
+            ->assertFailed();
+    }
+
+    /**
+     * A server that answers and refuses is not an unreachable one. Reported as
+     * unreachable, an operator goes looking at the network for what is a token.
+     */
+    public function test_the_ping_command_tells_a_refusal_from_an_unreachable_server(): void
+    {
+        if (FakeServer::isExternal()) {
+            $this->markTestSkipped('a real server fixes its auth at launch; this needs a per-test token');
+        }
+
+        $guarded = FakeServer::start('s3cret');
+
+        try {
+            config()->set('rostam.connections.guarded', $guarded->connectionConfig(['token' => 'wrong']));
+
+            $this->artisan('rostam:ping --connection=guarded')
+                ->expectsOutputToContain('refused')
+                ->assertFailed();
+        } finally {
+            $guarded->stop();
+        }
     }
 
     /**

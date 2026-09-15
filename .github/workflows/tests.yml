@@ -129,7 +129,7 @@ jobs:
           # server, and every beta-only test would skip without failing. Stable
           # takes the highest release that is not a pre-release. The picker also
           # names the asset and the checksums.txt of the SAME release.
-          set -- $(php -r '
+          picked=$(php -r '
             $best = null;
             foreach (json_decode(file_get_contents("releases.json"), true) as $release) {
                 if ($release["draft"] || (getenv("CHANNEL") === "stable" && $release["prerelease"])) {
@@ -147,6 +147,11 @@ jobs:
             if ($best[3] === "") { fwrite(STDERR, "release {$best[0]} ships no checksums.txt\n"); exit(1); }
             echo $best[1], " ", $best[2], " ", $best[3];
           ')
+
+          # Split after the substitution, not with it: `set -- $(...)` reports
+          # set's own status, so a picker that exits non-zero would be missed by
+          # `set -e` and surface later as an unbound variable instead.
+          set -- $picked
           url=$1 name=$2 sums=$3
 
           echo "downloading $name"

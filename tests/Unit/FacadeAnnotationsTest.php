@@ -177,7 +177,13 @@ class FacadeAnnotationsTest extends TestCase
         $signature = preg_replace('/\s+/', ' ', trim($signature)) ?? '';
         $signature = preg_replace('/[\w\\\\]+\\\\(\w+)/', '$1', $signature) ?? '';   // namespaces
         $signature = preg_replace('/\barray<[^>]*>|\blist<[^>]*>/', 'array', $signature) ?? '';
+        $signature = strtolower(str_replace(' ', '', $signature));
 
-        return str_replace(['?', ' '], ['', ''], strtolower($signature));
+        // `?x` and `x|null` are one type written two ways. The `?` itself is NOT
+        // forgiven: dropping it from `?string get()` says the method never
+        // answers null, which is the opposite of what it does.
+        $signature = preg_replace('/(\w+)\|null|null\|(\w+)/', '?$1$2', $signature) ?? '';
+
+        return $signature;
     }
 }
