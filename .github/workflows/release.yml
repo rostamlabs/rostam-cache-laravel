@@ -28,14 +28,19 @@ jobs:
 
       # The tag name is data from whoever pushed it, so it reaches the shell as
       # an environment variable and is checked before anything else uses it.
+      #
+      # Only what Composer reads as a release: vX.Y.Z, optionally with one of
+      # its stability suffixes. A tag it cannot parse - v0.3.0-next.1 - would
+      # pass every gate here, get a GitHub release, and never reach Packagist.
+      # -dev is refused too, since Composer reads it as a branch, not a release.
       - name: Check the tag
         env:
           TAG: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::not a version tag: $TAG"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|RC|rc|a|b|p|pl|patch)\.?[0-9]*)?$'; then
+            echo "::error::not a version tag Composer reads as a release: $TAG"
             exit 1
           fi
           if ! git merge-base --is-ancestor "$SHA" origin/main; then
@@ -86,12 +91,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # The nearest version tag this one descends from - not the highest
-          # version number, which may sit on another line entirely and make the
-          # notes empty or wrong.
-          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || true)
+          # What was verified is the commit this run started on. A tag moved
+          # while the gates ran points somewhere nothing checked.
+          if [ "$(git rev-parse "$TAG^{commit}")" != "$SHA" ]; then
+            echo "::error::$TAG moved while it was being verified; push it again to re-run"
+            exit 1
+          fi
+
+          # alpha, beta and RC are pre-releases to Composer; a patch suffix is not.
+          prerelease=false
+          if printf '%s' "$TAG" | grep -Eq -- '-(alpha|beta|RC|rc|a|b)\.?[0-9]*$'; then
+            prerelease=true
+          fi
+
+          # The notes run from the highest version tag this one descends from -
+          # by ancestry, so a tag on another line cannot empty them - and, for a
+          # stable release, the highest STABLE one, so they cover everything
+          # since the last release people installed rather than since its RC.
+          # versionsort.suffix sorts v0.3.0-beta1 below v0.3.0.
+          previous=''
+          for candidate in $(git -c versionsort.suffix=- tag --merged "$TAG^" --list 'v[0-9]*' --sort=-version:refname 2>/dev/null || true); do
+            if [ "$prerelease" = false ] && printf '%s' "$candidate" | grep -Eq -- '-(alpha|beta|RC|rc|a|b)\.?[0-9]*$'; then
+              continue
+            fi
+            previous=$candidate
+            break
+          done
           if [ -n "$previous" ]; then
             notes=$(git log --no-merges --pretty='- %s' "$previous..$TAG")
             body=$(printf '## Changes since %s\n\n%s' "$previous" "$notes")
@@ -112,4 +140,5 @@ jobs:
           gh release "$action" "$TAG" \
             --title "$TAG" \
             --notes "$body" \
+            --prerelease="$prerelease" \
             --verify-tag
