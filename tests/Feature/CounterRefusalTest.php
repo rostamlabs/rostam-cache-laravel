@@ -7,8 +7,11 @@ namespace Rostam\Cache\Tests\Feature;
 
 use PHPUnit\Framework\TestCase;
 use Rostam\Cache\RostamStore;
+use Rostam\Cache\Tests\Support\FailingClient;
 use Rostam\Exceptions\ServerException;
+use Rostam\Kv\Protocol\Status;
 use Rostam\Kv\TcpClient;
+use Rostam\Testing\ArrayKvClient;
 use Rostam\Testing\FakeServer;
 
 /**
@@ -64,5 +67,27 @@ class CounterRefusalTest extends TestCase
 
         $this->assertFalse($store->increment('name'));
         $store->forget('name');
+    }
+
+    /**
+     * The other half of the same guard, which no server a test can start will
+     * produce: only a replica answers NOT_LEADER, and "this write went to the
+     * wrong node" is not "that value is not a counter" either.
+     */
+    public function test_a_replica_that_is_not_the_leader_is_thrown_not_returned_as_false(): void
+    {
+        $store = RostamStore::make(
+            new FailingClient(new ArrayKvClient, 'increment', Status::NOT_LEADER, '10.0.0.2:7000'),
+            'app:',
+            ['flush' => 'unsupported'],
+        );
+
+        try {
+            $store->increment('hits');
+            $this->fail('an increment routed to a replica came back as a value');
+        } catch (ServerException $exception) {
+            $this->assertTrue($exception->isNotLeader());
+            $this->assertSame('10.0.0.2:7000', $exception->detail);
+        }
     }
 }
