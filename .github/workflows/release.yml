@@ -111,9 +111,11 @@ jobs:
           # by ancestry, so a tag on another line cannot empty them - and, for a
           # stable release, the highest STABLE one, so they cover everything
           # since the last release people installed rather than since its RC.
-          # versionsort.suffix sorts v0.3.0-beta1 below v0.3.0.
+          # The suffixes are listed in the order Composer ranks them - alpha,
+          # beta, RC, then the release - so v0.3.0-RC1 sorts above -beta2 and
+          # below v0.3.0; a patch suffix is not listed and sorts above its base.
           previous=''
-          for candidate in $(git -c versionsort.suffix=- tag --merged "$TAG^" --list 'v[0-9]*' --sort=-version:refname 2>/dev/null || true); do
+          for candidate in $(git -c versionsort.suffix=-alpha -c versionsort.suffix=-a -c versionsort.suffix=-beta -c versionsort.suffix=-b -c versionsort.suffix=-RC -c versionsort.suffix=-rc tag --merged "$TAG^" --list 'v[0-9]*' --sort=-version:refname 2>/dev/null || true); do
             if [ "$prerelease" = false ] && printf '%s' "$candidate" | grep -Eq -- '-(alpha|beta|RC|rc|a|b)\.?[0-9]*$'; then
               continue
             fi
