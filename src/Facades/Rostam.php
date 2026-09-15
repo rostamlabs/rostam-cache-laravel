@@ -8,6 +8,8 @@ namespace Rostam\Cache\Facades;
 use Illuminate\Support\Facades\Facade;
 use Rostam\Cache\RostamManager;
 use Rostam\Contracts\KvClient;
+use Rostam\Contracts\ReportsKvMetrics;
+use Rostam\Kv\Metrics\KvMetrics;
 use Rostam\TimeUnit;
 
 /**
@@ -15,9 +17,11 @@ use Rostam\TimeUnit;
  *
  * The first three are the manager's own; everything after is forwarded to the
  * default connection by {@see RostamManager::__call()}, so this list has to
- * track {@see KvClient} exactly - an annotation for a method that is not there
- * is not a documentation slip, it is a call that fatals at runtime with nothing
- * to catch it beforehand.
+ * track the client exactly - {@see KvClient}, and {@see ReportsKvMetrics} for
+ * `kvMetrics()` - because an annotation for a method that is not there is not a
+ * documentation slip, it is a call that fatals at runtime with nothing to catch
+ * it beforehand. A connection built by a custom resolver answers `kvMetrics()`
+ * only if it implements ReportsKvMetrics; the default TcpClient does.
  *
  * TTLs are seconds unless a call passes {@see TimeUnit::Milliseconds}.
  *
@@ -43,6 +47,7 @@ use Rostam\TimeUnit;
  * @method static int ttl(string $key, TimeUnit $unit = TimeUnit::Seconds)
  * @method static void flush() wipes the WHOLE server keyspace, not just this prefix (rostam v0.6.0+)
  * @method static bool ping()
+ * @method static KvMetrics kvMetrics() the server's own counters, including live evictions (rostam v0.7.0-beta3+)
  * @method static void set(string $key, string $value, int $ttl = 0, TimeUnit $unit = TimeUnit::Seconds)
  * @method static void setex(string $key, int $seconds, string $value)
  * @method static void psetex(string $key, int $milliseconds, string $value)

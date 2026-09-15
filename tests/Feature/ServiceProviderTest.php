@@ -133,6 +133,19 @@ class ServiceProviderTest extends TestCase
         $this->assertTrue(Rostam::ping());
     }
 
+    /**
+     * Forwarded like the rest, although it lives on its own interface rather
+     * than on KvClient - the annotation alone would not prove the call lands.
+     */
+    public function test_the_facade_reads_the_servers_eviction_count(): void
+    {
+        if (! FakeServer::supports('0.7.0-beta3')) {
+            $this->markTestSkipped('__kv_metrics__ arrived in rostam v0.7.0-beta3');
+        }
+
+        $this->assertIsInt(Rostam::kvMetrics()->evictionsLive());
+    }
+
     public function test_the_framework_rate_limiter_resets_after_its_window(): void
     {
         // The regression this guards: Rostam's incr clears the TTL, and

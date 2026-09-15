@@ -23,6 +23,7 @@ use Rostam\Cache\Support\GenerationRegistry;
 use Rostam\Cache\Tags\RefreshingTagSet;
 use Rostam\Contracts\KvClient;
 use Rostam\Exceptions\ServerException;
+use Rostam\Kv\Protocol\Status;
 
 /**
  * A Laravel cache store backed by Rostam's key-value engine (v0.5.0+).
@@ -474,23 +475,36 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
      * an 8-byte counter - somebody cached a string where a tally belongs.
      *
      * THE LIMIT OF THAT, STATED PLAINLY. A real rostam-server answers this with
-     * a bare "internal error" carrying nothing to match on, so a server that is
-     * genuinely in trouble - a full shard, a revoked key - is indistinguishable
-     * from a type mismatch, and both arrive here as false. The package fake
-     * returns a specific message and made this look better than it is. Until the
-     * server distinguishes them, an increment that returns false is worth
-     * looking at rather than assuming.
+     * its generic "internal error", carrying nothing to match on, so a server
+     * that failed the op for some other reason is indistinguishable from a type
+     * mismatch, and both arrive here as false. Until the server distinguishes
+     * them, an increment that returns false is worth looking at rather than
+     * assuming.
      *
-     * A ProtocolException is NOT swallowed. That one means the framing came back
-     * wrong - the stream is out of step with its answers - and reporting it as
-     * "this key is not a counter" would hide a broken connection behind a
-     * plausible application-level result. It belongs to the caller.
+     * Only that generic error becomes false. Every other refusal is a statement
+     * about the connection, not the value, and is thrown: a token the server
+     * refuses (it fails every other op loudly too, and must not turn increments
+     * into quiet falses), or a replica that is not the leader. Before v0.2.0
+     * both were swallowed here.
+     *
+     * Nor is a ProtocolException. That one means the framing came back wrong -
+     * the stream is out of step with its answers - or the request could not be
+     * encoded at all, and reporting either as "this key is not a counter" would
+     * hide it behind a plausible application-level result. It belongs to the
+     * caller. So does anything the key's own resolution throws, which is why
+     * that happens outside the guard.
      */
     protected function counter(string $key, int $delta, int $seconds): int|bool
     {
+        $qualified = $this->namespace->qualify($key);
+
         try {
-            return $this->client->increment($this->namespace->qualify($key), $delta, $seconds);
-        } catch (ServerException) {
+            return $this->client->increment($qualified, $delta, $seconds);
+        } catch (ServerException $exception) {
+            if ($exception->status !== Status::ERROR) {
+                throw $exception;
+            }
+
             return false;
         }
     }

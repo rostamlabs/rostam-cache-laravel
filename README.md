@@ -20,13 +20,16 @@ token auth, with no extensions beyond core streams.
   the advisory check turned off. Claiming it would promise something you
   cannot actually install.
 - **Rostam v0.5.0 or newer**, started with a `-tcp` listener
-  (**v0.6.0** for the optional `'flush' => 'server'` mode)
+  (**v0.6.0** for the optional `'flush' => 'server'` mode, **v0.7.0-beta3** for
+  `Rostam::kvMetrics()`)
 
 v0.5.0 is where the conditional writes (`set_nx`, `cas`, `cad`, `caex`) and
 `incr_ex` landed. They are what make `add()` atomic, locks Redis-grade, and
-`increment()` keep its window — this package is built on them, and it says so
-plainly (`UnsupportedOperationException`) rather than misbehaving if you point
-it at an older server.
+`increment()` keep its window — this package is built on them. Pointed at an
+older server they come back as the server's generic `internal error`, thrown as
+a `ServerException`: rostam answers an op it does not know with the same error
+as any other failure, so the driver cannot tell you the server is too old, and
+does not guess.
 
 ```bash
 ROSTAM_API_KEY=$(openssl rand -hex 32) rostam-server -tcp 127.0.0.1:7000 -data /var/lib/rostam
@@ -131,6 +134,13 @@ is what makes `Cache::increment()` a single atomic server-side operation rather
 than a read-modify-write race, and it is why `Cache::increment()` on a string
 returns `false` instead of silently corrupting the value.
 
+`false` is the answer to rostam's generic `internal error` only, which is what a
+non-counter value gets - and, since the server gives that one error for several
+causes, it is worth a look rather than an assumption. Anything that is about the
+connection rather than the value is thrown, as it is from every other call: a
+token the server refuses, a replica that is not the leader, a request that could
+not be encoded. (Before v0.2.0 the first two also came back as `false`.)
+
 The window behaves exactly like Redis's `INCRBY`, because `incr_ex` rewrites the
 value against the key's stored absolute deadline:
 
@@ -208,8 +218,9 @@ laravel_cache:0:user:1
 
 `Cache::flush()` (and `php artisan cache:clear`) increments the generation. Reads
 stop seeing the old data immediately; the bytes themselves are reclaimed by their
-TTL or by Rostam's ring-buffer eviction. Give long-lived entries a TTL if you run
-the server under `PolicyRejectWrites`, where nothing is evicted.
+TTL or by Rostam's eviction. Give long-lived entries a TTL if your server refuses
+writes at capacity instead of evicting - replicated shards under `-cluster` do -
+because there abandoned generations hold their memory until they expire.
 
 The generation is re-read from the server at most every `epoch_refresh` seconds
 (default 10). That is the window in which *this* process may still serve data
@@ -308,10 +319,24 @@ a TTL and the engine expires it.
 
 ## What eviction costs you
 
-Rostam's default `AtCapPolicy` is `PolicyRingbufEvict`: at capacity it overwrites
-**the oldest entries in the oldest page**. That is write order, not LRU - reading a
-key does not keep it alive. Redis defaults to `noeviction`, so two things that are
-theoretical there are real here.
+A single-node `rostam-server` **always evicts** at capacity (`PolicyRingbufEvict`),
+and nothing in its flags or config changes that; only replicated shards refuse
+writes instead. It overwrites **the oldest entries in the oldest page**. That is
+write order, not LRU - reading a key does not keep it alive. Redis defaults to
+`noeviction`, so two things that are theoretical there are real here.
+
+Every write still answers success when it pushes something else out. Measured on
+v0.7.0-beta6 with a 256 MiB budget, 400 one-megabyte writes all succeeded and 235
+read back. On v0.7.0-beta3 and newer the server counts it, and you can read the
+count:
+
+```php
+Rostam::kvMetrics()->evictionsLive();   // live records displaced since the server started
+```
+
+For a cache that number is a miss rate. Anything on the same server that must not
+be lost - queued jobs, sessions you cannot afford to drop - needs a server that
+never gets there.
 
 **Tags would invalidate themselves, so this driver replaces the tag set.**
 Laravel implements tags by storing one random id per tag and folding it into
@@ -343,6 +368,16 @@ evicted and read back as zero would make everything you flushed reachable again,
 which is worse than a miss. Tags cannot be defended the same way, because their
 ids are random rather than monotonic - there is nothing to compare a lost one
 against.
+
+## How large a value can be
+
+A value has to fit in one page of the server's cache, and the page size follows
+from `max_memory` divided across the shards. On a default single-node server that
+is **about 1 MiB** (1,048,544 bytes on v0.6.0 and 1,048,540 on v0.7.0-beta6, on
+the same machine) - far below the 16 MiB a request frame may carry. A larger
+`put` fails with the server's generic `internal error`, thrown as a
+`ServerException`. Fewer shards or a larger `max_memory` raise it; serialized
+collections and rendered pages are what usually reach it.
 
 ## Compatibility
 
@@ -462,12 +497,15 @@ composer install
 composer test
 ```
 
-The suite runs without a Rostam server: `tests/Support/server.php` is a
-throwaway PHP implementation of the same wire protocol, started in a child
-process. It reproduces the server behaviours the driver leans on — `incr_ex`
-refusing non-8-byte values and stamping its TTL on create only, expired keys
-reading as absent so `set_nx` re-acquires — and a `--legacy` mode that refuses
-the v0.5.0 ops, which is how the version guard is tested.
+The suite runs without a Rostam server, against the fake that ships with
+`rostamlabs/rostam-client-php` (`Rostam\Testing\FakeServer`): a PHP
+implementation of the same wire protocol, started in a child process. It
+reproduces the server behaviours the driver leans on — `incr_ex` refusing
+non-8-byte values and stamping its TTL on create only, expired keys reading as
+absent so `set_nx` re-acquires, the server's exact error bytes.
+
+Point it at a real server with `ROSTAM_TEST_SERVER=host:port`; CI does, against
+both the stable and the newest pre-release rostam.
 
 ## License
 
