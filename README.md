@@ -394,11 +394,13 @@ against.
 ## How large a value can be
 
 An entry has to fit in one page of the server's cache, and the page bounds **the
-key and the value together**. The page size follows from `max_memory` divided
-across the shards; on a default single-node server `strlen($key) + strlen($value)`
-reached **1,048,550 bytes on v0.6.0** and **1,048,546 on v0.7.0-beta6 and beta7**,
-measured on the same machine and constant across key lengths - far below the
-16 MiB a request frame may carry. The key is the whole key this driver writes,
+key and the value together**. On a default single-node server
+`strlen($key) + strlen($value)` reached **1,048,550 bytes on v0.6.0** and
+**1,048,546 on v0.7.0-beta6 and beta7**, constant across key lengths - far below
+the 16 MiB a request frame may carry. It is a constant per deployment rather than
+a share of `max_memory`: a one-shard server measured **2,097,106** with a 32 MiB
+budget, and a 512 MiB server still measured 1,048,546, so fewer shards mean bigger
+pages. Measure yours. The key is the whole key this driver writes,
 prefix, generation and tag segments included, so a long key leaves that much less
 for the value. A larger entry fails with the server's generic `internal error`,
 thrown as a `ServerException`. Fewer shards or a larger `max_memory` raise it;
