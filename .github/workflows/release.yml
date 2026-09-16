@@ -128,6 +128,18 @@ jobs:
           else
             body='First release.'
           fi
+
+          # A list of commit subjects says what changed; it does not say what the
+          # release IS. When the tag is annotated, that message leads - it is
+          # written for whoever is deciding whether to upgrade, and it is written
+          # in Markdown because this is where it lands. Without it the notes for
+          # v0.2.0 lived only in the tag object, where nobody would ever read
+          # them, and hand-editing the release afterwards was undone by the next
+          # re-push of the tag.
+          annotation=$(git tag -l "$TAG" --format='%(contents)')
+          if [ -n "$annotation" ]; then
+            body=$(printf '%s\n\n%s' "$annotation" "$body")
+          fi
           # Create or reconcile, never fail on "it already exists". A tag can be
           # re-pushed - moved onto a later commit before anyone has installed it,
           # or retried after a transient failure - and when that happens the gates
@@ -144,3 +156,54 @@ jobs:
             --notes "$body" \
             --prerelease="$prerelease" \
             --verify-tag
+
+      - name: Tell Packagist, and check that it listened
+        env:
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Packagist's GitHub hook has failed silently: v0.3.0 and v0.3.1 of the
+          # client sat uncrawled for a day while every dependent's CI refused to
+          # resolve `^0.3`, and nothing anywhere went red. A release that depends
+          # on someone else noticing is not finished, so it asks - and then reads
+          # back, because asking is the part that failed.
+          if [ -z "${PACKAGIST_USERNAME:-}" ] || [ -z "${PACKAGIST_TOKEN:-}" ]; then
+            echo "::notice::no Packagist credentials on this repository - not telling it about $TAG"
+            exit 0
+          fi
+
+          package=$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' composer.json | head -1)
+
+          # The token is a query parameter, so the URL is never echoed and curl
+          # is never put in verbose mode here.
+          status=$(curl -sS -o /tmp/packagist.out -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d "{\"repository\":{\"url\":\"https://github.com/${GITHUB_REPOSITORY}\"}}" \
+            "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_TOKEN}")
+
+          if [ "$status" != "202" ] && [ "$status" != "200" ]; then
+            echo "::error::Packagist answered $status to the update request"
+            cat /tmp/packagist.out
+            exit 1
+          fi
+
+          # Crawling is asynchronous, so the answer above only means it was
+          # asked. What matters is the version being installable.
+          # The p2 metadata is minified JSON, so the version is one fixed string
+          # - "version":"v1.2.3" - and version_normalized spells it differently
+          # (1.2.3.0), so there is nothing else for this to match.
+          for attempt in $(seq 1 20); do
+            if curl -sS "https://repo.packagist.org/p2/${package}.json" \
+              | grep -qF "\"version\":\"${TAG}\""; then
+              echo "Packagist is serving $package $TAG"
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "::error::Packagist accepted the request but is still not serving $package $TAG"
+          echo "::error::check the package's GitHub hook - a dependent pinning this version cannot install it"
+          exit 1
