@@ -409,6 +409,10 @@ v0.7.0-beta7, `strlen($key) + strlen($value)`:
 | 256 MiB / 4 | 4 MiB | 4,194,274 |
 | 128 MiB / 1 | 8 MiB | 8,388,578 |
 
+Those are in-memory shards, 30 bytes under the page. A persistent shard (`-data`)
+fits 16 bytes less again — 2,097,106 where the table says 2,097,122 — and `-data`
+is what the Requirements quick-start starts.
+
 Most deployments sit on the 1 MiB floor — at the default 256 shards it takes an
 8 GiB budget to clear it — which is why raising `max_memory` alone usually changes
 nothing while halving the shard count changes it at once.
