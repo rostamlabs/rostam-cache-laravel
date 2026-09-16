@@ -323,24 +323,28 @@ A single-node `rostam-server` **evicts rather than refusing a write** — nothin
 its flags or config makes it refuse; only replicated shards do that. By default it
 overwrites **the oldest entries in the oldest page**: write order, not LRU, so
 reading a key does not keep it alive, and a key that merely waits while other
-writes churn past it goes when the buffer wraps, however much room the node has.
-Redis defaults to `noeviction`, so two things that are theoretical there are real
-here.
+writes churn past it goes when the buffer wraps — a bigger budget delays that
+wrap, it does not prevent it. Redis defaults to `noeviction`, so two things that
+are theoretical there are real here.
 
 Opt-in server flags change *what* is evicted, never *whether* — and none of them
 is a guarantee:
 
 - **`-relocating-eviction`** copies a page's still-live records forward instead of
   dropping them with it. Best-effort by design: it never allocates a page, never
-  triggers another eviction and never fails a write, so a record that does not fit
-  the room left over "is simply left to be dropped". Measured on v0.7.0-beta7 with
-  a 32 MiB budget, put/delete churn of ten times the budget: by default two
-  untouched keys were evicted with nothing else live; with this flag both survived.
-- **`-sieve-visited-bit`**, which needs the flag above, spares records read or
-  rewritten since eviction last passed them — with the pair, reading a key does
-  keep it alive.
-- **`-in-place-same-size-update`** cuts the other way: a rewritten key stops moving
-  to the newest page, so a hot key is evicted on the same schedule as a cold one.
+  triggers another eviction and never fails a write, and it spends at most the room
+  the freed page has left after the write that triggered it — capped again per
+  eviction — so a record that does not fit "is simply left to be dropped". Measured
+  on v0.7.0-beta7 with a 32 MiB budget, put/delete churn of ten times the budget:
+  by default two untouched keys were evicted with nothing else live; with this flag
+  both survived.
+- **`-sieve-visited-bit`**, which needs the flag above, narrows that rescue to
+  records read or rewritten since eviction last passed them — so reading a key
+  helps, at the cost of rescuing fewer records overall rather than whichever ones
+  relocation met first.
+- **`-in-place-same-size-update`** (single-node **and without `-data`**) cuts the
+  other way: a rewritten key stops moving to the newest page, so a hot key is
+  evicted on the same schedule as a cold one.
 
 All of them are single-node only; under `-cluster` they do nothing.
 
@@ -394,17 +398,27 @@ against.
 ## How large a value can be
 
 An entry has to fit in one page of the server's cache, and the page bounds **the
-key and the value together**. On a default single-node server
-`strlen($key) + strlen($value)` reached **1,048,550 bytes on v0.6.0** and
-**1,048,546 on v0.7.0-beta6 and beta7**, constant across key lengths - far below
-the 16 MiB a request frame may carry. It is a constant per deployment rather than
-a share of `max_memory`: a one-shard server measured **2,097,106** with a 32 MiB
-budget, and a 512 MiB server still measured 1,048,546, so fewer shards mean bigger
-pages. Measure yours. The key is the whole key this driver writes,
-prefix, generation and tag segments included, so a long key leaves that much less
-for the value. A larger entry fails with the server's generic `internal error`,
-thrown as a `ServerException`. Fewer shards or a larger `max_memory` raise it;
-serialized collections and rendered pages are what usually reach it.
+key and the value together**. The page follows the PER-SHARD budget:
+`floorPow2(max_memory / shards / 16)`, clamped to 1 MiB…1 GiB. Measured on
+v0.7.0-beta7, `strlen($key) + strlen($value)`:
+
+| `max_memory` / shards | page | largest entry |
+| --- | --- | --- |
+| default (256 shards) | 1 MiB | **1,048,546** (1,048,550 on v0.6.0) |
+| 32 MiB / 1 | 2 MiB | 2,097,122 |
+| 256 MiB / 4 | 4 MiB | 4,194,274 |
+| 128 MiB / 1 | 8 MiB | 8,388,578 |
+
+Most deployments sit on the 1 MiB floor — at the default 256 shards it takes an
+8 GiB budget to clear it — which is why raising `max_memory` alone usually changes
+nothing while halving the shard count changes it at once.
+
+The key counted is the whole key this driver writes — prefix, generation and tag
+segments included — so a long key leaves that much less for the value. A larger
+entry fails with the server's generic `internal error`, thrown as a
+`ServerException`; past 16 MiB the client refuses it as a `ProtocolException`
+before sending, because that is the frame limit. Serialized collections and
+rendered pages are what usually reach either.
 
 ## Compatibility
 
