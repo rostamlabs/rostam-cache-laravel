@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs this whole file again, on the tagged commit.
+  workflow_call:
 
 permissions:
   contents: read
@@ -21,15 +23,17 @@ jobs:
     # asking the oldest allowed Pint to agree with the newest about the same
     # file is a question with no answer rather than a finding.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: '8.3'
           coverage: none
 
       - name: Install dependencies
-        uses: ramsey/composer-install@v3
+        uses: ramsey/composer-install@a8d0d959dab41457692a5e2041bd9b757a119e3f # 3.2.1
 
       - run: vendor/bin/pint --test
 
@@ -57,9 +61,11 @@ jobs:
             testbench: '11.*'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -71,13 +77,13 @@ jobs:
           "orchestra/testbench:${{ matrix.testbench }}"
 
       - name: Install dependencies
-        uses: ramsey/composer-install@v3
+        uses: ramsey/composer-install@a8d0d959dab41457692a5e2041bd9b757a119e3f # 3.2.1
 
       - name: Run the suite
         run: vendor/bin/phpunit
 
   conformance:
-    name: conformance against a real rostam-server
+    name: conformance against rostam-server (${{ matrix.channel }})
     runs-on: ubuntu-latest
 
     # The suite's default target is a fake server written in PHP. A fake is a
@@ -86,26 +92,94 @@ jobs:
     # fail in production. This lane talks to the real binary instead - it is
     # what caught the store swallowing a framing error as "this key is not a
     # counter", and the tag ids that a real evicting cache drops.
-    steps:
-      - uses: actions/checkout@v4
+    #
+    # Twice. GitHub's releases/latest skips pre-releases, so it answers the stable
+    # server people run today - and a lane that only ever saw that one would
+    # never meet what a beta changed. The pre-release lane takes the highest
+    # version of any kind, by version rather than date.
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, prerelease]
 
-      - uses: shivammathur/setup-php@v2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: '8.3'
           coverage: none
 
       - name: Install dependencies
-        uses: ramsey/composer-install@v3
+        uses: ramsey/composer-install@a8d0d959dab41457692a5e2041bd9b757a119e3f # 3.2.1
 
-      - name: Fetch the latest rostam-server
+      - name: Fetch rostam-server (${{ matrix.channel }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ matrix.channel }}
         run: |
           set -euo pipefail
-          url=$(curl -fsSL https://api.github.com/repos/rostamlabs/rostam/releases/latest \
-            | grep -o 'https://[^"]*linux_amd64\.tar\.gz' | head -n1)
-          echo "downloading $url"
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/rostamlabs/rostam/releases?per_page=50" -o releases.json
+
+          # The HIGHEST version, not the newest by date. Picking by date, a patch
+          # published after a beta would hand the pre-release lane a stable
+          # server, and every beta-only test would skip without failing. Stable
+          # takes the highest release that is not a pre-release. The picker also
+          # names the asset and the checksums.txt of the SAME release.
+          picked=$(php -r '
+            $best = null;
+            foreach (json_decode(file_get_contents("releases.json"), true) as $release) {
+                if ($release["draft"] || (getenv("CHANNEL") === "stable" && $release["prerelease"])) {
+                    continue;
+                }
+                $assets = array_column($release["assets"], "browser_download_url", "name");
+                foreach ($assets as $asset => $download) {
+                    if (str_ends_with($asset, "linux_amd64.tar.gz")
+                        && ($best === null || version_compare(ltrim($release["tag_name"], "v"), ltrim($best[0], "v"), ">"))) {
+                        $best = [$release["tag_name"], $download, $asset, $assets["checksums.txt"] ?? ""];
+                    }
+                }
+            }
+            if ($best === null) { fwrite(STDERR, "no linux_amd64 release to test against\n"); exit(1); }
+            if ($best[3] === "") { fwrite(STDERR, "release {$best[0]} ships no checksums.txt\n"); exit(1); }
+            echo $best[1], " ", $best[2], " ", $best[3];
+          ')
+
+          # Split after the substitution, not with it: `set -- $(...)` reports
+          # set's own status, so a picker that exits non-zero would be missed by
+          # `set -e` and surface later as an unbound variable instead.
+          set -- $picked
+          url=$1 name=$2 sums=$3
+
+          echo "downloading $name"
           curl -fsSL "$url" -o rostam.tar.gz
+          curl -fsSL "$sums" -o checksums.txt
+
+          # The one input this job does not get from a pinned source is the
+          # binary it then executes, so it is checked against the checksums the
+          # release publishes beside it.
+          expected=$(awk -v name="$name" '$2 == name || $2 == "*"name {print $1}' checksums.txt)
+          actual=$(sha256sum rostam.tar.gz | cut -d' ' -f1)
+          if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+            echo "::error::checksum mismatch for $name (expected '$expected', got '$actual')"
+            exit 1
+          fi
+
           tar xzf rostam.tar.gz
-          ./rostam-server --version
+
+          # "rostam-server 0.7.0-beta6 (go1.26.5 linux/amd64)" -> 0.7.0-beta6.
+          # A version that does not read as one fails the job: tests gate on it,
+          # and a garbled one would make every newer-op test skip in silence.
+          version=$(./rostam-server --version | awk '{print $2}')
+          if ! printf '%s' "$version" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::could not read a version from: $(./rostam-server --version)"
+            exit 1
+          fi
+          echo "rostam-server $version"
+          echo "ROSTAM_TEST_SERVER_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Start it on the binary TCP listener
         run: |
@@ -122,4 +196,7 @@ jobs:
       - name: Run the suite against it
         env:
           ROSTAM_TEST_SERVER: 127.0.0.1:7411
+          # This job started that server two steps ago and nothing else uses
+          # it, so the tests that wipe a keyspace may run.
+          ROSTAM_TEST_SERVER_IS_DISPOSABLE: '1'
         run: vendor/bin/phpunit

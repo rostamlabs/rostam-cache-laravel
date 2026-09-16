@@ -13,9 +13,12 @@ use Illuminate\Contracts\Cache\Store;
  *
  * WHY IT EXISTS. Laravel folds a random per-tag id into every tagged key's name
  * and stores that id with `forever()`. On Redis, whose default policy is
- * `noeviction`, the id stays put. Rostam's default is `PolicyRingbufEvict`,
- * which overwrites the oldest entries in the oldest page - write order, not
- * LRU, so READING the id does nothing to keep it alive. An id written once at
+ * `noeviction`, the id stays put. A single-node rostam evicts instead, and its
+ * default `PolicyRingbufEvict` overwrites the oldest entries in the oldest page
+ * - write order, not LRU, so READING the id does nothing to keep it alive.
+ * (`-relocating-eviction -sieve-visited-bit` does spare recently read records,
+ * best-effort; this class does not assume the server was started with them.)
+ * An id written once at
  * boot and only ever read is therefore first in line, and when it goes the next
  * read mints a replacement: every entry under that tag becomes unreachable at
  * once, silently, while the cache is otherwise healthy and the data is still

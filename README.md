@@ -20,13 +20,16 @@ token auth, with no extensions beyond core streams.
   the advisory check turned off. Claiming it would promise something you
   cannot actually install.
 - **Rostam v0.5.0 or newer**, started with a `-tcp` listener
-  (**v0.6.0** for the optional `'flush' => 'server'` mode)
+  (**v0.6.0** for the optional `'flush' => 'server'` mode, **v0.7.0-beta3** for
+  `Rostam::kvMetrics()`)
 
 v0.5.0 is where the conditional writes (`set_nx`, `cas`, `cad`, `caex`) and
 `incr_ex` landed. They are what make `add()` atomic, locks Redis-grade, and
-`increment()` keep its window — this package is built on them, and it says so
-plainly (`UnsupportedOperationException`) rather than misbehaving if you point
-it at an older server.
+`increment()` keep its window — this package is built on them. Pointed at an
+older server they come back as the server's generic `internal error`, thrown as
+a `ServerException`: rostam answers an op it does not know with the same error
+as any other failure, so the driver cannot tell you the server is too old, and
+does not guess.
 
 ```bash
 ROSTAM_API_KEY=$(openssl rand -hex 32) rostam-server -tcp 127.0.0.1:7000 -data /var/lib/rostam
@@ -131,6 +134,13 @@ is what makes `Cache::increment()` a single atomic server-side operation rather
 than a read-modify-write race, and it is why `Cache::increment()` on a string
 returns `false` instead of silently corrupting the value.
 
+`false` is the answer to rostam's generic `internal error` only, which is what a
+non-counter value gets - and, since the server gives that one error for several
+causes, it is worth a look rather than an assumption. Anything that is about the
+connection rather than the value is thrown, as it is from every other call: a
+token the server refuses, a replica that is not the leader, a request that could
+not be encoded. (Before v0.2.0 the first two also came back as `false`.)
+
 The window behaves exactly like Redis's `INCRBY`, because `incr_ex` rewrites the
 value against the key's stored absolute deadline:
 
@@ -208,8 +218,9 @@ laravel_cache:0:user:1
 
 `Cache::flush()` (and `php artisan cache:clear`) increments the generation. Reads
 stop seeing the old data immediately; the bytes themselves are reclaimed by their
-TTL or by Rostam's ring-buffer eviction. Give long-lived entries a TTL if you run
-the server under `PolicyRejectWrites`, where nothing is evicted.
+TTL or by Rostam's eviction. Give long-lived entries a TTL if your server refuses
+writes at capacity instead of evicting - replicated shards under `-cluster` do -
+because there abandoned generations hold their memory until they expire.
 
 The generation is re-read from the server at most every `epoch_refresh` seconds
 (default 10). That is the window in which *this* process may still serve data
@@ -308,10 +319,50 @@ a TTL and the engine expires it.
 
 ## What eviction costs you
 
-Rostam's default `AtCapPolicy` is `PolicyRingbufEvict`: at capacity it overwrites
-**the oldest entries in the oldest page**. That is write order, not LRU - reading a
-key does not keep it alive. Redis defaults to `noeviction`, so two things that are
-theoretical there are real here.
+A single-node `rostam-server` **evicts rather than refusing a write** — nothing in
+its flags or config makes it refuse; only replicated shards do that. By default it
+overwrites **the oldest entries in the oldest page**: write order, not LRU, so
+reading a key does not keep it alive, and a key that merely waits while other
+writes churn past it goes when the buffer wraps — a bigger budget delays that
+wrap, it does not prevent it. Redis defaults to `noeviction`, so two things that
+are theoretical there are real here.
+
+Opt-in server flags change *what* is evicted, never *whether* — and none of them
+is a guarantee:
+
+- **`-relocating-eviction`** copies a page's still-live records forward instead of
+  dropping them with it. Best-effort by design: it never allocates a page, never
+  triggers another eviction and never fails a write, and it spends at most the room
+  the freed page has left after the write that triggered it — capped again per
+  eviction — so a record that does not fit "is simply left to be dropped". Measured
+  on v0.7.0-beta7 with a 32 MiB budget, put/delete churn of ten times the budget:
+  by default two untouched keys were evicted with nothing else live; with this flag
+  both survived.
+- **`-sieve-visited-bit`**, which needs the flag above, narrows that rescue to
+  records read or rewritten since eviction last passed them — so reading a key
+  helps, at the cost of rescuing fewer records overall rather than whichever ones
+  relocation met first.
+- **`-in-place-same-size-update`** (single-node **and without `-data`**) cuts the
+  other way: a rewritten key stops moving to the newest page, so a hot key is
+  evicted on the same schedule as a cold one.
+
+All of them are single-node only; under `-cluster` they do nothing.
+
+Every write still answers success when it pushes something else out. Measured on
+v0.7.0-beta6 with a 256 MiB budget on one shard, 400 writes of 1,000,000 bytes all
+succeeded and 235 read back. On v0.7.0-beta3 and newer the server counts it, and
+you can read the count:
+
+```php
+Rostam::kvMetrics()->evictionsLive();   // live records displaced since the server started, or null
+```
+
+`null` means the server does not report that counter — anything older than
+v0.7.0-beta3 — and is not the same answer as zero.
+
+For a cache that number is a miss rate. Anything on the same server that must not
+be lost - queued jobs, sessions you cannot afford to drop - needs a server that
+never gets there.
 
 **Tags would invalidate themselves, so this driver replaces the tag set.**
 Laravel implements tags by storing one random id per tag and folding it into
@@ -343,6 +394,35 @@ evicted and read back as zero would make everything you flushed reachable again,
 which is worse than a miss. Tags cannot be defended the same way, because their
 ids are random rather than monotonic - there is nothing to compare a lost one
 against.
+
+## How large a value can be
+
+An entry has to fit in one page of the server's cache, and the page bounds **the
+key and the value together**. The page follows the PER-SHARD budget:
+`floorPow2(max_memory / shards / 16)`, clamped to 1 MiB…1 GiB. Measured on
+v0.7.0-beta7, `strlen($key) + strlen($value)`:
+
+| `max_memory` / shards | page | largest entry |
+| --- | --- | --- |
+| default (256 shards) | 1 MiB | **1,048,546** (1,048,550 on v0.6.0) |
+| 32 MiB / 1 | 2 MiB | 2,097,122 |
+| 256 MiB / 4 | 4 MiB | 4,194,274 |
+| 128 MiB / 1 | 8 MiB | 8,388,578 |
+
+Those are in-memory shards, 30 bytes under the page. A persistent shard (`-data`)
+fits 16 bytes less again — 2,097,106 where the table says 2,097,122 — and `-data`
+is what the Requirements quick-start starts.
+
+Most deployments sit on the 1 MiB floor — at the default 256 shards it takes an
+8 GiB budget to clear it — which is why raising `max_memory` alone usually changes
+nothing while halving the shard count changes it at once.
+
+The key counted is the whole key this driver writes — prefix, generation and tag
+segments included — so a long key leaves that much less for the value. A larger
+entry fails with the server's generic `internal error`, thrown as a
+`ServerException`; past 16 MiB the client refuses it as a `ProtocolException`
+before sending, because that is the frame limit. Serialized collections and
+rendered pages are what usually reach either.
 
 ## Compatibility
 
@@ -388,9 +468,9 @@ passing a different object rather than forking one:
 
 | Seam | Interface | Ships with | Swap it to… |
 | --- | --- | --- | --- |
-| Transport | `Contracts\Client` | `Client\TcpClient` | instrument, fail over, or fake the wire |
+| Transport | `Rostam\Contracts\KvClient` | `Rostam\Kv\TcpClient` | instrument, fail over, or fake the wire |
 | Value encoding | `Contracts\ValueSerializer` | `PhpSerializer`, `IgbinarySerializer` | msgpack, compression, encryption |
-| Keys and flushing | `Contracts\CacheNamespace` | `GenerationalNamespace`, `StaticNamespace` | a real key-scan flush, if Rostam grows one |
+| Keys and flushing | `Contracts\CacheNamespace` | `GenerationalNamespace`, `StaticNamespace`, `ServerFlushNamespace` | a real key-scan flush, if Rostam grows one |
 
 Registering your own, from any service provider:
 
@@ -440,6 +520,7 @@ new RostamStore($client, $namespace, $serializer, $lockGeneration);
 | `timeout` | `5.0` | seconds for each read and write |
 | `pool_size` | `4` | idle sockets kept per connection |
 | `persistent` | `false` | PHP persistent sockets, kept by the worker across requests |
+| `topology` | `'unknown'` | `'single-node'` lets batch writes go as one `put_batch` instead of a pipeline — measured through `putMany()`, 2,000 entries in 6.8 ms against 118.3 ms. The op routes by its first key, so on a cluster it would strand every other shard's keys: the client checks the declaration against the server and throws `TopologyMismatchException` before writing anything. A value that is neither is refused when the connection is built |
 | `retry_on_stale_connection` | `true` | re-send an idempotent op once when a pooled socket turns out to have been closed while idle |
 | `tls.enabled` | `false` | wrap the connection in TLS |
 | `tls.ca` / `tls.cert` / `tls.key` | `null` | CA bundle and client certificate for mTLS |
@@ -462,12 +543,15 @@ composer install
 composer test
 ```
 
-The suite runs without a Rostam server: `tests/Support/server.php` is a
-throwaway PHP implementation of the same wire protocol, started in a child
-process. It reproduces the server behaviours the driver leans on — `incr_ex`
-refusing non-8-byte values and stamping its TTL on create only, expired keys
-reading as absent so `set_nx` re-acquires — and a `--legacy` mode that refuses
-the v0.5.0 ops, which is how the version guard is tested.
+The suite runs without a Rostam server, against the fake that ships with
+`rostamlabs/rostam-client-php` (`Rostam\Testing\FakeServer`): a PHP
+implementation of the same wire protocol, started in a child process. It
+reproduces the server behaviours the driver leans on — `incr_ex` refusing
+non-8-byte values and stamping its TTL on create only, expired keys reading as
+absent so `set_nx` re-acquires, the server's exact error bytes.
+
+Point it at a real server with `ROSTAM_TEST_SERVER=host:port`; CI does, against
+both the stable and the newest pre-release rostam.
 
 ## License
 

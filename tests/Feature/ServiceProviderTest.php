@@ -133,6 +133,19 @@ class ServiceProviderTest extends TestCase
         $this->assertTrue(Rostam::ping());
     }
 
+    /**
+     * Forwarded like the rest, although it lives on its own interface rather
+     * than on KvClient - the annotation alone would not prove the call lands.
+     */
+    public function test_the_facade_reads_the_servers_eviction_count(): void
+    {
+        if (! FakeServer::supports('0.7.0-beta3')) {
+            $this->markTestSkipped('__kv_metrics__ arrived in rostam v0.7.0-beta3');
+        }
+
+        $this->assertIsInt(Rostam::kvMetrics()->evictionsLive());
+    }
+
     public function test_the_framework_rate_limiter_resets_after_its_window(): void
     {
         // The regression this guards: Rostam's incr clears the TTL, and
@@ -189,7 +202,32 @@ class ServiceProviderTest extends TestCase
     {
         config()->set('rostam.connections.dead', ['host' => '127.0.0.1', 'port' => 1, 'connect_timeout' => 0.5]);
 
-        $this->artisan('rostam:ping --connection=dead')->assertFailed();
+        $this->artisan('rostam:ping --connection=dead')
+            ->expectsOutputToContain('unreachable')
+            ->assertFailed();
+    }
+
+    /**
+     * A server that answers and refuses is not an unreachable one. Reported as
+     * unreachable, an operator goes looking at the network for what is a token.
+     */
+    public function test_the_ping_command_tells_a_refusal_from_an_unreachable_server(): void
+    {
+        if (FakeServer::isExternal()) {
+            $this->markTestSkipped('a real server fixes its auth at launch; this needs a per-test token');
+        }
+
+        $guarded = FakeServer::start('s3cret');
+
+        try {
+            config()->set('rostam.connections.guarded', $guarded->connectionConfig(['token' => 'wrong']));
+
+            $this->artisan('rostam:ping --connection=guarded')
+                ->expectsOutputToContain('refused')
+                ->assertFailed();
+        } finally {
+            $guarded->stop();
+        }
     }
 
     /**

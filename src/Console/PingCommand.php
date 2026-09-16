@@ -8,6 +8,7 @@ namespace Rostam\Cache\Console;
 use Illuminate\Console\Command;
 use Rostam\Cache\RostamManager;
 use Rostam\Exceptions\RostamException;
+use Rostam\Exceptions\ServerException;
 
 class PingCommand extends Command
 {
@@ -31,6 +32,13 @@ class PingCommand extends Command
             $startedAt = microtime(true);
             $client->ping();
             $warm = (microtime(true) - $startedAt) * 1000;
+        } catch (ServerException $exception) {
+            // The server answered - it just refused. Reporting that as
+            // "unreachable" sends an operator to the network for a token
+            // problem, which is the same conflation counter() used to make.
+            $this->components->error("Rostam [{$name}] answered but refused the request: ".$exception->getMessage());
+
+            return self::FAILURE;
         } catch (RostamException $exception) {
             $this->components->error("Rostam [{$name}] is unreachable: ".$exception->getMessage());
 

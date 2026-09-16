@@ -122,9 +122,11 @@ class GenerationRegistry
      * Keep a counter monotonic, restoring it on the server when it has gone
      * backwards.
      *
-     * A counter is an ordinary entry in the cache it governs, and Rostam's
-     * default `PolicyRingbufEvict` overwrites "the oldest entries in the oldest
-     * page" - write order, not LRU, so reading a counter does not keep it alive.
+     * A counter is an ordinary entry in the cache it governs, and a single-node
+     * rostam's default `PolicyRingbufEvict` overwrites "the oldest entries in
+     * the oldest page" - write order, not LRU, so reading a counter does not
+     * keep it alive unless the server was started with `-relocating-eviction
+     * -sieve-visited-bit`, and even then only best-effort.
      * A counter is written once per flush and only read afterwards, so it ages
      * until it is evicted. Then `get` returns nothing, which reads as generation
      * zero, and `increment` recreates it at one. Either way the generation moves
