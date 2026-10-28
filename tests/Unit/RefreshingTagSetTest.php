@@ -5,6 +5,7 @@ declare(strict_types=1);
 
 namespace Rostam\Cache\Tests\Unit;
 
+use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\TagSet;
 use PHPUnit\Framework\TestCase;
 use Rostam\Cache\RostamStore;
@@ -155,6 +156,93 @@ class RefreshingTagSetTest extends TestCase
         $set->reset();
 
         $this->assertNotSame($before, $this->tagSet(['people'])->getNamespace());
+    }
+
+    public function test_minting_a_whole_set_writes_it_in_one_round_trip(): void
+    {
+        $this->store->get('warm-up');                  // the flush generation is read once, first
+        $this->client->ops = [];
+
+        $this->tagSet(['a', 'b', 'c'])->getNamespace();
+
+        $this->assertSame(['getMany', 'putMany'], $this->client->ops, 'three new tags must not cost three writes');
+    }
+
+    public function test_a_whole_aged_set_is_rewritten_in_one_round_trip(): void
+    {
+        $ids = $this->tagSet(['a', 'b', 'c'])->getNamespace();
+
+        $this->now += 301;
+        $this->client->ops = [];
+
+        $this->assertSame($ids, $this->tagSet(['a', 'b', 'c'])->getNamespace(), 'refreshing must keep every id');
+        $this->assertSame(['getMany', 'putMany'], $this->client->ops);
+    }
+
+    public function test_only_the_aged_tags_of_a_set_are_rewritten(): void
+    {
+        $this->tagSet(['a', 'b'])->getNamespace();
+        $this->now += 200;
+        $this->tagSet(['c'])->getNamespace();         // younger than a and b
+
+        $this->now += 150;                            // a and b are 350s old, c is 150s
+        $cWrittenAt = $this->store->get('tag:c:key')[2];
+        $this->client->ops = [];
+
+        $this->tagSet(['a', 'b', 'c'])->getNamespace();
+
+        $this->assertSame(['getMany', 'putMany'], $this->client->ops);
+        $this->assertSame($this->now, $this->store->get('tag:a:key')[2]);
+        $this->assertSame($this->now, $this->store->get('tag:b:key')[2]);
+        $this->assertSame($cWrittenAt, $this->store->get('tag:c:key')[2], 'a young tag must not be rewritten');
+    }
+
+    public function test_resetting_a_set_writes_every_new_id_in_one_round_trip(): void
+    {
+        $set = $this->tagSet(['a', 'b', 'c']);
+        $before = $set->getNamespace();
+
+        $this->client->ops = [];
+        $set->reset();
+
+        $this->assertSame(['putMany'], $this->client->ops, 'a flush of three tags must not cost three writes');
+        $this->assertNotSame($before, $this->tagSet(['a', 'b', 'c'])->getNamespace());
+    }
+
+    public function test_every_reset_tag_gets_its_own_new_id(): void
+    {
+        $set = $this->tagSet(['a', 'b']);
+        $set->getNamespace();
+        $set->reset();
+
+        $ids = array_map(fn (string $name) => $this->store->get('tag:'.$name.':key')[1], ['a', 'b']);
+
+        $this->assertNotSame($ids[0], $ids[1]);
+        $this->assertSame(implode('|', $ids), $this->tagSet(['a', 'b'])->getNamespace());
+    }
+
+    public function test_a_store_that_cannot_batch_still_gets_every_tag_stamped(): void
+    {
+        $store = new ArrayStore;
+        $set = new RefreshingTagSet($store, ['a', 'b'], 300, fn () => $this->now);
+
+        $first = $set->getNamespace();
+        $set->reset();
+
+        $this->assertNotSame($first, $set->getNamespace());
+        $this->assertSame('stamped', $store->get('tag:a:key')[0]);
+        $this->assertSame('stamped', $store->get('tag:b:key')[0]);
+    }
+
+    public function test_the_store_writes_many_values_without_expiry(): void
+    {
+        $this->store->foreverMany(['one' => 1, 'two' => 'second']);
+
+        $this->assertSame(1, $this->store->get('one'));
+        $this->assertSame('second', $this->store->get('two'));
+        $this->assertSame(-1, $this->client->ttl('app:0:one'));
+        $this->assertSame(-1, $this->client->ttl('app:0:two'));
+        $this->assertTrue($this->store->foreverMany([]));
     }
 
     public function test_the_store_uses_it_through_the_repository(): void

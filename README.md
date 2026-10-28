@@ -383,6 +383,10 @@ write followed only by reads while 1.28 GB of unrelated traffic went past:
 
 The same class also reads a whole set in one round trip:
 `tags(['a', 'b', 'c'])` costs one exchange rather than Laravel's three sequential ones.
+The writes go the same way: every aged id of a set is rewritten in one more, and
+`tags([...])->flush()` writes every tag's new id in one rather than one per tag.
+Measured with five tags, a tagged operation whose ids have all aged went from
+seven round trips to three, and a flush from five to one.
 
 It cannot help a tag nobody touches - a refresh needs something to read the tag -
 but that is the harmless half: nothing was using it, so what follows is a cold
