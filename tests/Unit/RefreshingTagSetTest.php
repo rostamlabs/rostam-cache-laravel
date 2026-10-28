@@ -221,7 +221,7 @@ class RefreshingTagSetTest extends TestCase
         $this->assertSame(implode('|', $ids), $this->tagSet(['a', 'b'])->getNamespace());
     }
 
-    public function test_a_store_that_cannot_batch_is_written_one_tag_at_a_time(): void
+    public function test_a_store_that_cannot_batch_still_gets_every_tag_stamped(): void
     {
         $store = new ArrayStore;
         $set = new RefreshingTagSet($store, ['a', 'b'], 300, fn () => $this->now);

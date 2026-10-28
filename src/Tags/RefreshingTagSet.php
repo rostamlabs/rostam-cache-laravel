@@ -90,7 +90,7 @@ class RefreshingTagSet extends TagSet
 
     /**
      * Every id in the set, in one round trip, refreshing whatever has aged in
-     * one more.
+     * at most one more round trip.
      *
      * @return array<int, string>
      */
