@@ -12,6 +12,7 @@ use Illuminate\Contracts\Cache\CanFlushLocks;
 use Illuminate\Contracts\Cache\LockProvider;
 use InvalidArgumentException;
 use Rostam\Cache\Contracts\CacheNamespace;
+use Rostam\Cache\Contracts\StoresManyForever;
 use Rostam\Cache\Contracts\ValueSerializer;
 use Rostam\Cache\Contracts\WipesTheServer;
 use Rostam\Cache\Namespacing\GenerationalNamespace;
@@ -49,7 +50,7 @@ use Rostam\Kv\Protocol\Status;
  * counters, because that is what the server's `incr_ex` accepts, and that is
  * what makes `increment()` a single atomic op that keeps its window.
  */
-class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
+class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider, StoresManyForever
 {
     public function __construct(
         protected KvClient $client,
@@ -223,6 +224,31 @@ class RostamStore extends TaggableStore implements CanFlushLocks, LockProvider
             $this->serializer->serialize($value),
             0
         );
+
+        return true;
+    }
+
+    /**
+     * Store every value without expiry, in one pipelined exchange - the
+     * forever() that putMany() cannot express, since its TTL is floored at a
+     * second.
+     *
+     * @param  array<string, mixed>  $values
+     */
+    public function foreverMany(array $values): bool
+    {
+        if ($values === []) {
+            return true;
+        }
+
+        $namespace = $this->namespace->resolve();
+        $entries = [];
+
+        foreach ($values as $key => $value) {
+            $entries[] = [$namespace.$key, $this->serializer->serialize($value), 0];
+        }
+
+        $this->client->putMany($entries);
 
         return true;
     }

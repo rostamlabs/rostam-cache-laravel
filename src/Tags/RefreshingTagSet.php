@@ -7,6 +7,7 @@ namespace Rostam\Cache\Tags;
 
 use Illuminate\Cache\TagSet;
 use Illuminate\Contracts\Cache\Store;
+use Rostam\Cache\Contracts\StoresManyForever;
 
 /**
  * A tag set that survives an evicting store, and reads the whole set at once.
@@ -40,6 +41,11 @@ use Illuminate\Contracts\Cache\Store;
  * work starts. The Store contract already has many(), which this driver answers
  * with one pipelined exchange, so the whole set now costs one.
  *
+ * The writes go the same way. Every tag of a set can age past the refresh
+ * interval together, and a flush resets every tag at once; written one by one,
+ * a set of five tags cost five more sequential round trips. On a store that
+ * implements {@see StoresManyForever} they are collected and written in one.
+ *
  * WHAT IT DOES NOT DO. A refresh happens when something touches the tag, so a
  * tag nobody reads for longer than the cache takes to turn over still loses its
  * id. That is the harmless half of the problem: nothing was using the tag, so
@@ -62,6 +68,14 @@ class RefreshingTagSet extends TagSet
     private const STAMPED = 'stamped';
 
     /**
+     * Writes held back while a whole set is being resolved or reset, keyed by
+     * tag key; null when each write goes out on its own.
+     *
+     * @var array<string, array{0: string, 1: string, 2: int}>|null
+     */
+    private ?array $deferred = null;
+
+    /**
      * @param  int  $refresh  seconds before a tag id is rewritten to keep it
      *                        young; 0 disables refreshing entirely
      */
@@ -75,7 +89,8 @@ class RefreshingTagSet extends TagSet
     }
 
     /**
-     * Every id in the set, in one round trip, refreshing whatever has aged.
+     * Every id in the set, in one round trip, refreshing whatever has aged in
+     * one more.
      *
      * @return array<int, string>
      */
@@ -90,11 +105,27 @@ class RefreshingTagSet extends TagSet
 
         $ids = [];
 
-        foreach ($this->names as $index => $name) {
-            $ids[] = $this->resolve($name, $stored[$keys[$index]] ?? null);
-        }
+        $this->writingOnce(function () use ($keys, $stored, &$ids): void {
+            foreach ($this->names as $index => $name) {
+                $ids[] = $this->resolve($name, $stored[$keys[$index]] ?? null);
+            }
+        });
 
         return $ids;
+    }
+
+    /**
+     * Reset every tag in the set, writing the new ids in one round trip.
+     *
+     * @return void
+     */
+    public function reset()
+    {
+        $this->writingOnce(function (): void {
+            foreach ($this->names as $name) {
+                $this->resetTag($name);
+            }
+        });
     }
 
     /**
@@ -159,7 +190,42 @@ class RefreshingTagSet extends TagSet
      */
     private function write(string $name, string $id): void
     {
-        $this->store->forever($this->tagKey($name), [self::STAMPED, $id, $this->now()]);
+        $value = [self::STAMPED, $id, $this->now()];
+
+        if ($this->deferred !== null) {
+            $this->deferred[$this->tagKey($name)] = $value;
+
+            return;
+        }
+
+        $this->store->forever($this->tagKey($name), $value);
+    }
+
+    /**
+     * Run $work with its writes held back, then send them together: in one
+     * round trip on a store that can, one by one on any other. A single
+     * write goes out as forever() either way - it is one round trip already.
+     */
+    private function writingOnce(callable $work): void
+    {
+        $this->deferred = [];
+
+        try {
+            $work();
+            $writes = $this->deferred;
+        } finally {
+            $this->deferred = null;
+        }
+
+        if (count($writes) > 1 && $this->store instanceof StoresManyForever) {
+            $this->store->foreverMany($writes);
+
+            return;
+        }
+
+        foreach ($writes as $key => $value) {
+            $this->store->forever($key, $value);
+        }
     }
 
     private function now(): int
